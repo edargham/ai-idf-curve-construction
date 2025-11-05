@@ -96,7 +96,7 @@ def _format_idf_plot(title, metrics=None):
 
     # Add metrics overlay if provided
     if metrics is not None:
-        metrics_text = f"RMSE: {metrics['RMSE']:.4f}\nMAE: {metrics['MAE']:.4f}\nR²: {metrics['R2']:.4f}\nNSE: {metrics['NSE']:.4f}"
+        metrics_text = f"RMSE = {metrics['RMSE']:.4f}\nMAE = {metrics['MAE']:.4f}\nR² = {metrics['R2']:.4f}\nNSE = {metrics['NSE']:.4f}"
         plt.text(
             0.02,
             0.98,
@@ -155,7 +155,7 @@ def create_idf_plot(
         log_y_fine = intercept + slope * log_x_fine
         y_fine = np.exp(log_y_fine)
 
-        plt.plot(x_fine, y_fine, label=f"{rp}-year", color=colors[i], linewidth=2)
+        plt.plot(x_fine, y_fine, label=f"{rp}-year return period", color=colors[i], linewidth=2)
 
         if show_power_law_params:
             c = np.exp(intercept)

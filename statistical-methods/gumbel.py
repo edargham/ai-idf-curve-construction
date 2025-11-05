@@ -319,7 +319,7 @@ def main():
         return_periods,
         duration_hours,
         colors,
-        "Intensity-Duration-Frequency (IDF) Curves",
+        "Intensity-Duration-Frequency (IDF) Curves using the Statistical Method",
         "idf_curves_trad.png",
         avg_metrics,
         show_power_law_params=True,
