@@ -1,0 +1,17 @@
+data/*.csv
+.DS_Store
+*.old
+.DS_Store
+*.xlsx
+*.pt
+*.pth
+*.zip
+__pycache__/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+
+results/bey-aggregated-final.csv
+results/historical_intensity.csv
+.DS_Store
