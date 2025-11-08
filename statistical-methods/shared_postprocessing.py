@@ -438,6 +438,53 @@ def compare_with_literature(idf_data, lit_data, return_periods, model_name="Mode
     }
 
 
+def save_distribution_parameters(params_dict, distribution_name, filename=None):
+    """
+    Save distribution parameters to CSV file.
+    
+    Parameters:
+        params_dict (dict): Dictionary with duration as key and parameters tuple as value
+        distribution_name (str): Name of the distribution (e.g., 'GEV', 'Gumbel', 'Log-Normal', 'Log-Pearson-III')
+        filename (str, optional): Custom filename. If None, uses distribution name.
+    """
+    if filename is None:
+        filename = f"{distribution_name.lower().replace('-', '_')}_parameters.csv"
+    
+    # Create params directory if it doesn't exist
+    params_dir = os.path.join(os.path.dirname(__file__), "..", "params")
+    os.makedirs(params_dir, exist_ok=True)
+    
+    # Convert parameters dictionary to DataFrame
+    rows = []
+    for duration, params in params_dict.items():
+        row = {"Duration": duration}
+        
+        # Handle different parameter structures for different distributions
+        if distribution_name.upper() == "GUMBEL":
+            # Gumbel has (loc, scale)
+            row.update({"Location": params[0], "Scale": params[1]})
+        elif distribution_name.upper() in ["GEV", "LOG-NORMAL", "WEIBULL"]:
+            # GEV, Log-Normal, and Weibull have (shape, loc, scale)
+            row.update({"Shape": params[0], "Location": params[1], "Scale": params[2]})
+        elif distribution_name.upper() == "LOG-PEARSON-III":
+            # Log-Pearson III has (skew, loc, scale)
+            row.update({"Skew": params[0], "Location": params[1], "Scale": params[2]})
+        else:
+            # Generic handling - convert tuple to numbered parameters
+            for i, param in enumerate(params):
+                row[f"Parameter_{i+1}"] = param
+        
+        rows.append(row)
+    
+    # Create DataFrame and save to CSV
+    df = pd.DataFrame(rows)
+    file_path = os.path.join(params_dir, filename)
+    df.to_csv(file_path, index=False)
+    
+    print(f"{distribution_name} parameters saved to: {file_path}")
+    return file_path
+
+
 def get_literature_duration_mapping():
     """Get the standard literature duration mapping."""
     return {

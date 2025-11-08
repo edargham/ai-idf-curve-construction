@@ -23,6 +23,7 @@ from shared_postprocessing import (
     get_literature_duration_mapping,
     r2_score,
     nash_sutcliffe_efficiency,
+    save_distribution_parameters,
 )
 
 
@@ -271,6 +272,9 @@ def main():
     for dur in durations:
         loc, scale = gumbel_params[dur]
         print(f"{dur}: location = {loc:.4f}, scale = {scale:.4f}")
+    
+    # Save Gumbel parameters to CSV
+    save_distribution_parameters(gumbel_params, "Gumbel")
     
     # Validate on validation set
     print("\n" + "=" * 60)

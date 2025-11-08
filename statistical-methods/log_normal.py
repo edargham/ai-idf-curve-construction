@@ -23,6 +23,7 @@ from shared_postprocessing import (
     get_literature_duration_mapping,
     r2_score,
     nash_sutcliffe_efficiency,
+    save_distribution_parameters,
 )
 
 
@@ -272,6 +273,9 @@ def main():
     for dur in durations:
         shape, loc, scale = lognormal_params[dur]
         print(f"{dur}: shape = {shape:.4f}, location = {loc:.4f}, scale = {scale:.4f}")
+    
+    # Save Log-Normal parameters to CSV
+    save_distribution_parameters(lognormal_params, "Log-Normal")
     
     # Validate on validation set
     print("\n" + "=" * 60)
