@@ -15,6 +15,7 @@ from shared_io import (
     build_idf_from_out_scaled,
     compute_and_save_duration_metrics,
     plot_idf_comparisons,
+    plot_predictions_vs_observations,
 )
 from shared_metrics import nash_sutcliffe_efficiency, squared_pearson_r2 as r2_score
 from shared_dataprep_tcn import create_feats_and_labels, TensorRegressionDataset
@@ -643,6 +644,9 @@ if not val_df_combined.empty:
         col_names,
         "TCAN",
     )
+    
+    # Store overall metrics for later use
+    overall_rmse_val, overall_mae_val, overall_r2_val, overall_nse_val = overall_metrics
 else:
     for col in col_names:
         tcan_duration_metrics[col] = {
@@ -928,3 +932,25 @@ plot_idf_comparisons(
     "TCAN",
     "tcan",
 )
+
+# Plot predictions vs observations after IDF comparisons
+if not val_df_combined.empty and 'overall_rmse_val' in locals():
+    y_val_intensity = val_df_combined['intensity'].values
+    X_val_full = val_df_combined[["log_duration", "log_weibull_rank"]].values
+    X_val_scaled_full = scaler_X.transform(X_val_full)
+    final_model.eval()
+    with torch.no_grad():
+        out_scaled_val = final_model(torch.from_numpy(X_val_scaled_full.astype(np.float32)).to(device)).cpu().numpy().flatten()
+    preds_log = scaler_y.inverse_transform(out_scaled_val.reshape(-1, 1)).flatten()
+    preds_intensity = np.exp(preds_log)
+
+    overall_rmse, overall_mae, overall_r2, overall_nse = plot_overall_metrics
+    
+    metrics = {
+        'rmse': overall_rmse,
+        'mae': overall_mae,
+        'r2': overall_r2,
+        'nse': overall_nse
+    }
+
+    plot_predictions_vs_observations(y_val_intensity, preds_intensity, 'TCAN', 'tcan', metrics)

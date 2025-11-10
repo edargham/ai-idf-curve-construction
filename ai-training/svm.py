@@ -9,7 +9,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 # plotting and curve fitting are centralized in shared_io.plot_idf_comparisons
 from split_utils import build_train_val
-from shared_io import shared_preprocessing, build_idf_from_out_scaled, plot_idf_comparisons
+from shared_io import shared_preprocessing, build_idf_from_out_scaled, plot_idf_comparisons, plot_predictions_vs_observations
 from shared_metrics import nash_sutcliffe_efficiency, squared_pearson_r2 as r2_score
 
 
@@ -125,6 +125,11 @@ else:
     mae = np.nan
     r2_model = np.nan
     nse = np.nan
+
+# Plot predictions vs observations
+if len(y_val_intensity) > 0 and len(y_pred_intensity) == len(y_val_intensity):
+    metrics = {'rmse': rmse, 'mae': mae, 'r2': r2_model, 'nse': nse}
+    plot_predictions_vs_observations(y_val_intensity, y_pred_intensity, 'SVM', 'svm', metrics)
 
 # Use shared preprocessing constants and helpers
 durations = shared['durations']

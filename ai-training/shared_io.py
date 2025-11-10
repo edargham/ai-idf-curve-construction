@@ -481,7 +481,7 @@ def plot_idf_comparisons(
         0.98,
         f"RMSE: {gumbel_rmse:.4f}\nMAE: {gumbel_mae:.4f}\nR²: {gumbel_r2:.4f}\nNSE: {gumbel_nse:.4f}",
         transform=plt.gca().transAxes,
-        fontsize=10,
+        fontsize=12,
         verticalalignment="top",
         bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
     )
@@ -591,7 +591,7 @@ def plot_idf_comparisons(
             0.98,
             f"RMSE: {overall_lit_rmse:.4f}\nMAE: {overall_lit_mae:.4f}\nR²: {overall_lit_r2:.4f}\nNSE: {overall_lit_nse:.4f}",
             transform=plt.gca().transAxes,
-            fontsize=10,
+            fontsize=12,
             verticalalignment="top",
             bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
         )
@@ -659,7 +659,7 @@ def plot_idf_comparisons(
         0.98,
         f"MAE = {model_mae:.4f}\nRMSE = {model_rmse:.4f}\nR² = {model_r2:.4f}\nNSE = {model_nse:.4f}",
         transform=plt.gca().transAxes,
-        fontsize=10,
+        fontsize=12,
         verticalalignment="top",
         bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
     )
@@ -671,3 +671,88 @@ def plot_idf_comparisons(
     plt.savefig(out_path3, dpi=300)
     plt.show()
     print(f"IDF curves plot saved to: {out_path3}")
+
+
+def plot_predictions_vs_observations(
+    y_true, y_pred, model_tag, out_prefix, metrics=None
+):
+    """
+    Plot predictions vs observations with a 1:1 reference line.
+    
+    Parameters:
+    - y_true: array-like, true/observed values
+    - y_pred: array-like, predicted values  
+    - model_tag: str, name of the model for plot title
+    - out_prefix: str, prefix for output filename
+    - metrics: dict, optional metrics to display on plot (keys: rmse, mae, r2, nse)
+    """
+    plt.rcParams['font.family'] = 'Times New Roman'
+
+    if len(y_true) == 0 or len(y_pred) == 0:
+        print(f"Warning: No data available for {model_tag} predictions vs observations plot")
+        return
+        
+    if len(y_true) != len(y_pred):
+        print(f"Warning: Mismatch in data lengths for {model_tag}: observations={len(y_true)}, predictions={len(y_pred)}")
+        return
+    
+    # Create the plot
+    plt.figure(figsize=(8, 8))
+    
+    # Scatter plot of predictions vs observations
+    plt.scatter(y_true, y_pred, alpha=0.6, s=20, edgecolors='black', linewidth=0.5)
+    
+    # Add 1:1 reference line
+    min_val = min(np.min(y_true), np.min(y_pred))
+    max_val = max(np.max(y_true), np.max(y_pred)) 
+    plt.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='1:1 Reference Line')
+    
+    # Set labels and title
+    plt.xlabel('Observed Intensity (mm/hr)', fontsize=12)
+    plt.ylabel('Predicted Intensity (mm/hr)', fontsize=12)
+    plt.title(f'{model_tag}: Predictions vs Observations', fontsize=14)
+    
+    # Add grid and legend
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    
+    # Add metrics text box if provided
+    if metrics is not None:
+        metrics_text = ""
+        if 'rmse' in metrics:
+            metrics_text += f"RMSE = {metrics['rmse']:.4f}\n"
+        if 'mae' in metrics:
+            metrics_text += f"MAE = {metrics['mae']:.4f}\n"
+        if 'r2' in metrics:
+            metrics_text += f"R² = {metrics['r2']:.4f}\n"
+        if 'nse' in metrics:
+            metrics_text += f"NSE = {metrics['nse']:.4f}"
+            
+        if metrics_text:
+            plt.text(
+                0.02,
+                0.98,
+                metrics_text,
+                transform=plt.gca().transAxes,
+                fontsize=12,
+                verticalalignment="top",
+                bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
+            )
+    
+    # Make axes equal for better visual comparison
+    plt.axis('equal')
+    
+    # Adjust limits to show all data points clearly
+    margin = 0.05 * (max_val - min_val)
+    plt.xlim(min_val - margin, max_val + margin)
+    plt.ylim(min_val - margin, max_val + margin)
+    
+    plt.tight_layout()
+    
+    # Save the plot
+    out_path = os.path.join(
+        os.path.dirname(__file__), "..", "figures", f"predictions_vs_observations_{out_prefix}.png"
+    )
+    plt.savefig(out_path, dpi=300)
+    plt.show()
+    print(f"Predictions vs observations plot saved to: {out_path}")

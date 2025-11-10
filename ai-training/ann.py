@@ -13,7 +13,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 
 from split_utils import build_train_val
-from shared_io import shared_preprocessing, build_idf_from_out_scaled, compute_and_save_duration_metrics, plot_idf_comparisons
+from shared_io import shared_preprocessing, build_idf_from_out_scaled, compute_and_save_duration_metrics, plot_idf_comparisons, plot_predictions_vs_observations
 from shared_metrics import nash_sutcliffe_efficiency, squared_pearson_r2 as r2_score
 
 # Reproducibility: set a global seed and stabilize RNGs
@@ -342,6 +342,9 @@ else:
 
 duration_metrics, overall_metrics = compute_and_save_duration_metrics(val_df_combined, preds_intensity, duration_minutes, col_names, 'ANN', scaler_y=scaler_y)
 
+# Store overall metrics for later use
+overall_rmse_val, overall_mae_val, overall_r2_val, overall_nse_val = overall_metrics
+
 # Expose variables expected later in the file
 standard_idf_curves = idf_results['standard_idf_curves']
 gumbel_idf = pd.read_csv(os.path.join(os.path.dirname(__file__), "..", "results", "idf_data.csv"))
@@ -646,3 +649,15 @@ plot_idf_comparisons(
     'ANN',
     'ann'
 )
+
+# Plot predictions vs observations after IDF comparisons
+if not val_df_combined.empty and len(preds_intensity) > 0:
+    y_val_intensity = val_df_combined['intensity'].values
+    overall_rmse, overall_mae, overall_r2, overall_nse = plot_overall_metrics
+    metrics = {
+        'rmse': overall_rmse,
+        'mae': overall_mae,
+        'r2': overall_r2,
+        'nse': overall_nse
+    }
+    plot_predictions_vs_observations(y_val_intensity, preds_intensity, 'ANN', 'ann', metrics)
