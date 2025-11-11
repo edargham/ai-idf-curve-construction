@@ -669,10 +669,19 @@ if not val_df_combined.empty and 'preds_intensity' in locals():
     print("\nPerforming uncertainty analysis for TCAN...")
     try:
         obs_intensity = val_df_combined['intensity'].values
+        # Prepare validation tensor for MC Dropout
+        X_val_tensor = torch.from_numpy(X_val_scaled_full.astype(np.float32)).to(device)
+        
         uncertainty_metrics = analyze_ai_model_uncertainty(
             model_name="TCAN",
             predictions=preds_intensity,
-            observations=obs_intensity
+            observations=obs_intensity,
+            model=final_model,
+            X_val=X_val_tensor,
+            device=device,
+            scaler_y=scaler_y,
+            use_mc_dropout=True,
+            n_mc_samples=50
         )
         print("Uncertainty Analysis Results:")
         for key, value in uncertainty_metrics.items():

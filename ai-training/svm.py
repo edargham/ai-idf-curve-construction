@@ -138,7 +138,14 @@ if len(y_val_intensity) > 0 and len(y_pred_intensity) == len(y_val_intensity):
         uncertainty_metrics = analyze_ai_model_uncertainty(
             model_name="SVM",
             predictions=y_pred_intensity,
-            observations=y_val_intensity
+            observations=y_val_intensity,
+            model=model,
+            X_val=X_val_scaled,
+            scaler_y=scaler_y,
+            use_bootstrap=True,
+            X_train=X_train_scaled,
+            y_train=y_train_scaled,
+            n_bootstrap=50
         )
         print("Uncertainty Analysis Results:")
         for key, value in uncertainty_metrics.items():

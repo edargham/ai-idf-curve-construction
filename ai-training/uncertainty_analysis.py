@@ -160,7 +160,91 @@ def save_uncertainty_metrics(model_name, uncertainty_dict, output_file='results/
     print(f"Uncertainty metrics for {model_name} saved to {output_file}")
 
 
-def analyze_ai_model_uncertainty(model_name, predictions, observations, epistemic_std=None):
+def compute_mc_dropout_uncertainty(model, X_tensor, device, n_samples=30):
+    """
+    Compute epistemic uncertainty using Monte Carlo Dropout.
+    
+    Parameters:
+        model: PyTorch model with dropout layers
+        X_tensor: Input tensor
+        device: Device (CPU/CUDA/MPS)
+        n_samples: Number of MC samples
+        
+    Returns:
+        tuple: (mean_predictions, epistemic_std)
+    """
+    try:
+        import torch
+        
+        model.train()  # Enable dropout
+        predictions = []
+        
+        with torch.no_grad():
+            for _ in range(n_samples):
+                output = model(X_tensor).cpu().numpy().flatten()
+                predictions.append(output)
+        
+        model.eval()  # Disable dropout
+        
+        predictions = np.array(predictions)
+        mean_pred = predictions.mean(axis=0)
+        epistemic_std = predictions.std(axis=0).mean()
+        
+        return mean_pred, epistemic_std
+    except Exception as e:
+        print(f"Warning: MC Dropout failed: {e}")
+        return None, None
+
+
+def compute_bootstrap_uncertainty(model, X_train, y_train, X_val, n_bootstrap=20):
+    """
+    Compute epistemic uncertainty using bootstrap resampling for non-neural models.
+    
+    Parameters:
+        model: Scikit-learn model
+        X_train: Training features
+        y_train: Training targets
+        X_val: Validation features
+        n_bootstrap: Number of bootstrap samples
+        
+    Returns:
+        tuple: (mean_predictions, epistemic_std)
+    """
+    try:
+        from sklearn.utils import resample
+        
+        predictions = []
+        n_samples = len(X_train)
+        
+        for _ in range(n_bootstrap):
+            # Bootstrap sample
+            indices = resample(range(n_samples), n_samples=n_samples, replace=True)
+            X_boot = X_train[indices]
+            y_boot = y_train[indices]
+            
+            # Clone and fit model on bootstrap sample
+            from sklearn.base import clone
+            boot_model = clone(model)
+            boot_model.fit(X_boot, y_boot)
+            
+            # Predict on validation set
+            pred = boot_model.predict(X_val)
+            predictions.append(pred)
+        
+        predictions = np.array(predictions)
+        mean_pred = predictions.mean(axis=0)
+        epistemic_std = predictions.std(axis=0).mean()
+        
+        return mean_pred, epistemic_std
+    except Exception as e:
+        print(f"Warning: Bootstrap uncertainty estimation failed: {e}")
+        return None, None
+
+
+def analyze_ai_model_uncertainty(model_name, predictions, observations, epistemic_std=None, 
+                                 model=None, X_val=None, device=None, scaler_y=None,
+                                 use_mc_dropout=False, n_mc_samples=30,
+                                 use_bootstrap=False, X_train=None, y_train=None, n_bootstrap=20):
     """
     Comprehensive uncertainty analysis for AI-based IDF models.
     
@@ -169,10 +253,47 @@ def analyze_ai_model_uncertainty(model_name, predictions, observations, epistemi
         predictions (array): Model predictions
         observations (array): Observed values
         epistemic_std (float): Optional epistemic uncertainty measure
+        model: PyTorch model (for MC Dropout) or sklearn model (for bootstrap)
+        X_val: Validation input tensor/array
+        device: Computation device (for MC Dropout)
+        scaler_y: Scaler for inverse transform
+        use_mc_dropout (bool): Whether to use MC Dropout
+        n_mc_samples (int): Number of MC Dropout samples
+        use_bootstrap (bool): Whether to use bootstrap (for sklearn models)
+        X_train: Training features (for bootstrap)
+        y_train: Training targets (for bootstrap)
+        n_bootstrap (int): Number of bootstrap samples
         
     Returns:
         dict: Complete uncertainty metrics
     """
+    # Compute epistemic uncertainty via MC Dropout if requested
+    if use_mc_dropout and model is not None and X_val is not None:
+        print(f"  Computing epistemic uncertainty via MC Dropout ({n_mc_samples} samples)...")
+        mc_pred_scaled, mc_epistemic_std_scaled = compute_mc_dropout_uncertainty(
+            model, X_val, device, n_mc_samples
+        )
+        
+        if mc_epistemic_std_scaled is not None and scaler_y is not None:
+            # Transform epistemic std from scaled space to original space
+            # Approximate transformation for std
+            epistemic_std = mc_epistemic_std_scaled * scaler_y.scale_[0] if hasattr(scaler_y, 'scale_') else mc_epistemic_std_scaled
+        elif mc_epistemic_std_scaled is not None:
+            epistemic_std = mc_epistemic_std_scaled
+    
+    # Compute epistemic uncertainty via bootstrap if requested
+    elif use_bootstrap and model is not None and X_train is not None and y_train is not None and X_val is not None:
+        print(f"  Computing epistemic uncertainty via Bootstrap ({n_bootstrap} samples)...")
+        boot_pred_scaled, boot_epistemic_std_scaled = compute_bootstrap_uncertainty(
+            model, X_train, y_train, X_val, n_bootstrap
+        )
+        
+        if boot_epistemic_std_scaled is not None and scaler_y is not None:
+            # Transform epistemic std from scaled space to original space
+            epistemic_std = boot_epistemic_std_scaled * scaler_y.scale_[0] if hasattr(scaler_y, 'scale_') else boot_epistemic_std_scaled
+        elif boot_epistemic_std_scaled is not None:
+            epistemic_std = boot_epistemic_std_scaled
+    
     # Calculate prediction interval metrics
     prediction_metrics = calculate_prediction_intervals(
         predictions, 
