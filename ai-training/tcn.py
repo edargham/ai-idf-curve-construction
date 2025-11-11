@@ -19,6 +19,7 @@ from shared_io import (
 )
 from shared_metrics import nash_sutcliffe_efficiency, squared_pearson_r2 as r2_score
 from shared_dataprep_tcn import create_feats_and_labels, TensorRegressionDataset
+from uncertainty_analysis import analyze_ai_model_uncertainty
 
 # Reproducibility: set a global seed and stabilize RNGs
 SEED = 42
@@ -618,6 +619,23 @@ print("\nTCN Validation Metrics (2019-2025) by Duration:")
 print(pd.DataFrame(tcn_duration_metrics).T.round(4))
 print("\nTCN Average Metrics Across All Durations:")
 print(tcn_avg_metrics.round(4))
+
+# Perform uncertainty analysis
+if not val_df_combined.empty and 'preds_intensity' in locals():
+    print("\nPerforming uncertainty analysis for TCN...")
+    try:
+        obs_intensity = val_df_combined['intensity'].values
+        uncertainty_metrics = analyze_ai_model_uncertainty(
+            model_name="TCN",
+            predictions=preds_intensity,
+            observations=obs_intensity
+        )
+        print("Uncertainty Analysis Results:")
+        for key, value in uncertainty_metrics.items():
+            if isinstance(value, (int, float, np.number)):
+                print(f"  {key}: {value:.4f}")
+    except Exception as e:
+        print(f"Warning: Uncertainty analysis failed: {e}")
 
 # Define duration mapping for column names
 duration_mapping = {

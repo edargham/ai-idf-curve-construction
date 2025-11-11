@@ -25,6 +25,7 @@ from shared_postprocessing import (
     nash_sutcliffe_efficiency,
     save_distribution_parameters,
 )
+from uncertainty_analysis import analyze_statistical_model_uncertainty
 
 
 def calculate_empirical_return_periods(data):
@@ -312,6 +313,25 @@ def main():
         print(
             f"Warning: failed to save Log-Pearson III metrics to model_performance_metrics.csv: {e}"
         )
+    
+    # Perform uncertainty analysis
+    print("\nPerforming uncertainty analysis...")
+    try:
+        uncertainty_metrics = analyze_statistical_model_uncertainty(
+            model_name="Log-Pearson-III",
+            val_df=val_df,
+            durations=durations,
+            model_params=logpearson3_params,
+            return_periods=return_periods,
+            probabilities=probabilities,
+            distribution_type='logpearson3'
+        )
+        print("Uncertainty Analysis Results:")
+        for key, value in uncertainty_metrics.items():
+            if isinstance(value, (int, float, np.number)):
+                print(f"  {key}: {value:.4f}")
+    except Exception as e:
+        print(f"Warning: Uncertainty analysis failed: {e}")
     
     # Save IDF data
     print("\nSaving IDF curves data...")

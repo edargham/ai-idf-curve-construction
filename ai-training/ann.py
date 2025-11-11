@@ -15,6 +15,7 @@ from torch.utils.data import Dataset, DataLoader
 from split_utils import build_train_val
 from shared_io import shared_preprocessing, build_idf_from_out_scaled, compute_and_save_duration_metrics, plot_idf_comparisons, plot_predictions_vs_observations
 from shared_metrics import nash_sutcliffe_efficiency, squared_pearson_r2 as r2_score
+from uncertainty_analysis import analyze_ai_model_uncertainty
 
 # Reproducibility: set a global seed and stabilize RNGs
 SEED = 368683
@@ -396,6 +397,22 @@ print("\nANN Validation Metrics (2019-2025) by Duration:")
 print(pd.DataFrame(ann_duration_metrics).T.round(4))
 print("\nANN Average Metrics Across All Durations:")
 print(ann_avg_metrics.round(4))
+
+# Perform uncertainty analysis
+if not val_df_combined.empty and len(preds_intensity) > 0:
+    print("\nPerforming uncertainty analysis for ANN...")
+    try:
+        uncertainty_metrics = analyze_ai_model_uncertainty(
+            model_name="ANN",
+            predictions=preds_intensity,
+            observations=obs_intensity
+        )
+        print("Uncertainty Analysis Results:")
+        for key, value in uncertainty_metrics.items():
+            if isinstance(value, (int, float, np.number)):
+                print(f"  {key}: {value:.4f}")
+    except Exception as e:
+        print(f"Warning: Uncertainty analysis failed: {e}")
 
 # Define duration mapping for column names
 duration_mapping = {

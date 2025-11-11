@@ -25,6 +25,7 @@ from shared_postprocessing import (
     nash_sutcliffe_efficiency,
     save_distribution_parameters,
 )
+from uncertainty_analysis import analyze_statistical_model_uncertainty
 
 
 def calculate_empirical_return_periods(data):
@@ -305,6 +306,25 @@ def main():
         print(
             f"Warning: failed to save Statistical metrics to model_performance_metrics.csv: {e}"
         )
+    
+    # Perform uncertainty analysis
+    print("\nPerforming uncertainty analysis...")
+    try:
+        uncertainty_metrics = analyze_statistical_model_uncertainty(
+            model_name="Gumbel",
+            val_df=val_df,
+            durations=durations,
+            model_params=gumbel_params,
+            return_periods=return_periods,
+            probabilities=probabilities,
+            distribution_type='gumbel'
+        )
+        print("Uncertainty Analysis Results:")
+        for key, value in uncertainty_metrics.items():
+            if isinstance(value, (int, float, np.number)):
+                print(f"  {key}: {value:.4f}")
+    except Exception as e:
+        print(f"Warning: Uncertainty analysis failed: {e}")
     
     # Save IDF data
     print("\nSaving IDF curves data...")

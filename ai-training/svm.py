@@ -11,6 +11,7 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error
 from split_utils import build_train_val
 from shared_io import shared_preprocessing, build_idf_from_out_scaled, plot_idf_comparisons, plot_predictions_vs_observations
 from shared_metrics import nash_sutcliffe_efficiency, squared_pearson_r2 as r2_score
+from uncertainty_analysis import analyze_ai_model_uncertainty
 
 
 # Use centralized preprocessing (verbatim copy lives in shared_io.shared_preprocessing)
@@ -130,6 +131,21 @@ else:
 if len(y_val_intensity) > 0 and len(y_pred_intensity) == len(y_val_intensity):
     metrics = {'rmse': rmse, 'mae': mae, 'r2': r2_model, 'nse': nse}
     plot_predictions_vs_observations(y_val_intensity, y_pred_intensity, 'SVM', 'svm', metrics)
+    
+    # Perform uncertainty analysis
+    print("\nPerforming uncertainty analysis for SVM...")
+    try:
+        uncertainty_metrics = analyze_ai_model_uncertainty(
+            model_name="SVM",
+            predictions=y_pred_intensity,
+            observations=y_val_intensity
+        )
+        print("Uncertainty Analysis Results:")
+        for key, value in uncertainty_metrics.items():
+            if isinstance(value, (int, float, np.number)):
+                print(f"  {key}: {value:.4f}")
+    except Exception as e:
+        print(f"Warning: Uncertainty analysis failed: {e}")
 
 # Use shared preprocessing constants and helpers
 durations = shared['durations']
