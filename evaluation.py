@@ -829,7 +829,7 @@ Metrics Interpretation:
                 fontfamily='monospace',
                 bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.3))
         
-        plt.savefig("figures/model_evaluation_comprehensive.png", dpi=300, bbox_inches="tight")
+        # plt.savefig("figures/model_evaluation_comprehensive.png", dpi=300, bbox_inches="tight")
         plt.show()
         
         print("\n✓ Visualizations saved to 'figures/model_evaluation_comprehensive.png'")

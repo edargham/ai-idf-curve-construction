@@ -55,7 +55,7 @@ def create_feats_and_labels(df):
     
     # StandardScaler for better gradient flow and convergence
     # Centers data around 0 with unit variance (mean=0, std=1)
-    # This is superior to MinMaxScaler for neural networks because:
+    # This is superior to StandardScaler for neural networks because:
     # 1. Preserves distribution shape (not compressed to 0-1)
     # 2. Creates stronger gradients (not squeezed into narrow range)
     # 3. Treats positive and negative deviations symmetrically

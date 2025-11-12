@@ -11,6 +11,8 @@ __pycache__/
 **/*.pyc
 **/*.pyo
 **/*.pyd
+**/*.db
+**/*.md
 
 results/bey-aggregated-final.csv
 results/historical_intensity.csv

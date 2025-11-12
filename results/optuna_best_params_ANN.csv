@@ -1,0 +1,2 @@
+hidden_size,learning_rate,weight_decay,batch_size
+1024,0.004274869455295219,1.3199942261535016e-05,64

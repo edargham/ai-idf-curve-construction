@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
 from scipy.optimize import curve_fit
 
-# MinMaxScaler intentionally not imported here to avoid unused import warnings
+# StandardScaler intentionally not imported here to avoid unused import warnings
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 
 
@@ -339,46 +339,23 @@ def plot_idf_comparisons(
     standard_idf_curves,
     standard_durations_minutes,
     return_periods,
-    gumbel_idf,
-    literature_idf,
-    duration_mapping,
-    literature_duration_mapping,
     model_metrics,
-    gumbel_metrics,
-    overall_lit_metrics,
     model_tag,
     out_prefix,
 ):
     """
-    Create the three plotting outputs used in the scripts. Uses the same plotting
-    logic as in the original files and saves images with names based on out_prefix.
+    Create IDF curve plot for the model using validation data.
+    Uses the same plotting logic as in the original files and saves images with names based on out_prefix.
     """
     # Set Times New Roman as the default font
     plt.rcParams['font.family'] = 'Times New Roman'
     
     # model_metrics: raw validation metrics from training/evaluation (rmse, mae, r2_model, nse)
-    # gumbel_metrics: metrics computed for the model-vs-gumbel comparison (overall_rmse, overall_mae, overall_r2, overall_nse)
     model_rmse, model_mae, model_r2, model_nse = (
         model_metrics if model_metrics is not None else (np.nan, np.nan, np.nan, np.nan)
     )
-    gumbel_rmse, gumbel_mae, gumbel_r2, gumbel_nse = (
-        gumbel_metrics
-        if gumbel_metrics is not None
-        else (np.nan, np.nan, np.nan, np.nan)
-    )
-    overall_lit_rmse, overall_lit_mae, overall_lit_r2, overall_lit_nse = (
-        overall_lit_metrics
-        if overall_lit_metrics is not None
-        else (np.nan, np.nan, np.nan, np.nan)
-    )
 
-    # standard_durations_minutes is used directly below; no separate 'durations' variable needed
-
-    # Comparison plot vs Gumbel
-    plt.figure(figsize=(10, 6))
-    colors = ["blue", "green", "red", "purple", "orange", "brown"]
-    # duration_mask originally used in plotting selection; left out as unused
-
+    # Helper functions for curve fitting
     def power_law(x, a, b):
         return a * x ** (-b)
 
@@ -395,218 +372,10 @@ def plot_idf_comparisons(
         except Exception:
             return None
 
-    for i, rp in enumerate(return_periods):
-        csv_durations = np.array(standard_durations_minutes)
-        csv_intensities = np.array(standard_idf_curves[rp])
-        durations_filtered = []
-        intensities_filtered = []
-        for j, dur_min in enumerate(csv_durations):
-            if 1 <= dur_min <= 90:
-                durations_filtered.append(dur_min)
-                intensities_filtered.append(csv_intensities[j])
-        durations_hours = np.array(durations_filtered) / 60
-        intensities_filtered = np.array(intensities_filtered)
-        print(
-            f"📊 {model_tag} Plot {rp}-year: 5-min = {intensities_filtered[0]:.2f} mm/hr (CSV-loyal)"
-        )
-        sorted_indices = np.argsort(durations_hours)
-        sorted_hours = durations_hours[sorted_indices]
-        sorted_intensities = intensities_filtered[sorted_indices]
-        fit_result = safe_power_law_fit(sorted_hours, sorted_intensities)
-        if fit_result is not None:
-            smooth_curve_hours, smooth_curve_intensities = fit_result
-        else:
-            interp_func = interp1d(
-                sorted_hours,
-                sorted_intensities,
-                kind="cubic",
-                bounds_error=False,
-                fill_value="extrapolate",
-            )
-            smooth_curve_hours = np.linspace(
-                sorted_hours.min(), sorted_hours.max(), 100
-            )
-            smooth_curve_intensities = interp_func(smooth_curve_hours)
-            smooth_curve_intensities = np.maximum(smooth_curve_intensities, 0)
-        plt.plot(
-            smooth_curve_hours,
-            smooth_curve_intensities,
-            "-",
-            color=colors[i],
-            linewidth=2,
-            label=f"{model_tag} T = {rp} years",
-        )
-        # Gumbel
-        gumbel_row = gumbel_idf[gumbel_idf["Return Period (years)"] == rp].iloc[0]
-        gumbel_durations = []
-        gumbel_intensities = []
-        for idx, duration in enumerate(standard_durations_minutes):
-            if 1 <= duration <= 90:
-                gumbel_durations.append(duration / 60)
-                gumbel_intensities.append(gumbel_row[duration_mapping[idx]])
-        try:
-            params, _ = curve_fit(
-                power_law, np.array(gumbel_durations), np.array(gumbel_intensities)
-            )
-            smooth_durations = np.linspace(5 / 60, 1.5, 100)
-            smooth_intensities = power_law(smooth_durations, *params)
-            plt.plot(
-                smooth_durations,
-                smooth_intensities,
-                "--",
-                color=colors[i],
-                linewidth=1.5,
-                label=f"Gumbel T = {rp} years",
-            )
-        except RuntimeError:
-            plt.plot(
-                np.array(gumbel_durations),
-                gumbel_intensities,
-                "--",
-                color=colors[i],
-                linewidth=1.5,
-                label=f"Gumbel T = {rp} years",
-            )
-
     tick_positions = [15 / 60, 30 / 60, 45 / 60, 1, 1.25, 1.5]
     tick_labels = ["15min", "30min", "45min", "1hr", "1.25hr", "1.5hr"]
-    plt.xticks(tick_positions, tick_labels)
-    plt.xlabel("Duration (hours)", fontsize=12)
-    plt.ylabel("Intensity (mm/hr)", fontsize=12)
-    plt.title(f"IDF Curves Comparison: {model_tag} vs Gumbel", fontsize=14)
-    plt.grid(True)
-    # Use gumbel_metrics for the Gumbel-comparison annotation box
-    plt.text(
-        0.02,
-        0.98,
-        f"RMSE: {gumbel_rmse:.4f}\nMAE: {gumbel_mae:.4f}\nR²: {gumbel_r2:.4f}\nNSE: {gumbel_nse:.4f}",
-        transform=plt.gca().transAxes,
-        fontsize=12,
-        verticalalignment="top",
-        bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
-    )
-    plt.legend(loc="upper right", fontsize=9)
-    plt.tight_layout()
-    out_path = os.path.join(
-        os.path.dirname(__file__), "..", "figures", f"idf_comparison_{out_prefix}.png"
-    )
-    plt.savefig(out_path, dpi=300)
-    print(f"Comparison plot saved to: {out_path}")
 
-    # Literature plot
-    plt.figure(figsize=(10, 6))
-    for i, rp in enumerate(return_periods):
-        csv_durations = np.array(standard_durations_minutes)
-        csv_intensities = np.array(standard_idf_curves[rp])
-        durations_filtered = []
-        intensities_filtered = []
-        for j, dur_min in enumerate(csv_durations):
-            if 5 <= dur_min <= 90:
-                durations_filtered.append(dur_min)
-                intensities_filtered.append(csv_intensities[j])
-        durations_hours = np.array(durations_filtered) / 60
-        intensities_filtered = np.array(intensities_filtered)
-        print(
-            f"📊 {model_tag} Literature Plot {rp}-year: 5-min = {intensities_filtered[0]:.2f} mm/hr (CSV-loyal)"
-        )
-        sorted_indices = np.argsort(durations_hours)
-        sorted_hours = durations_hours[sorted_indices]
-        sorted_intensities = intensities_filtered[sorted_indices]
-        fit_result = safe_power_law_fit(sorted_hours, sorted_intensities)
-        if fit_result is not None:
-            smooth_curve_hours, smooth_curve_intensities = fit_result
-        else:
-            interp_func = interp1d(
-                sorted_hours,
-                sorted_intensities,
-                kind="cubic",
-                bounds_error=False,
-                fill_value="extrapolate",
-            )
-            smooth_curve_hours = np.linspace(
-                sorted_hours.min(), sorted_hours.max(), 100
-            )
-            smooth_curve_intensities = interp_func(smooth_curve_hours)
-            smooth_curve_intensities = np.maximum(smooth_curve_intensities, 0)
-        plt.plot(
-            smooth_curve_hours,
-            smooth_curve_intensities,
-            "-",
-            color=colors[i],
-            linewidth=2,
-            label=f"{model_tag} T = {rp} years",
-        )
-        lit_row = literature_idf[literature_idf["Return Period (years)"] == rp].iloc[0]
-        lit_durations = []
-        lit_intensities = []
-        for duration in standard_durations_minutes:
-            if 5 <= duration <= 120:
-                lit_col = literature_duration_mapping[duration]
-                lit_value = lit_row[lit_col]
-                if pd.notna(lit_value) and lit_value != "":
-                    lit_durations.append(duration / 60)
-                    lit_intensities.append(float(lit_value))
-        if len(lit_durations) >= 3:
-            try:
-                params, _ = curve_fit(
-                    power_law, np.array(lit_durations), np.array(lit_intensities)
-                )
-                smooth_durations = np.linspace(5 / 60, 1.5, 100)
-                smooth_intensities = power_law(smooth_durations, *params)
-                plt.plot(
-                    smooth_durations,
-                    smooth_intensities,
-                    "--",
-                    color=colors[i],
-                    linewidth=1.5,
-                    label=f"Literature T = {rp} years",
-                )
-            except RuntimeError:
-                plt.scatter(
-                    lit_durations,
-                    lit_intensities,
-                    color=colors[i],
-                    marker="o",
-                    s=30,
-                    label=f"Literature T = {rp} years",
-                )
-        elif len(lit_durations) > 0:
-            plt.scatter(
-                lit_durations,
-                lit_intensities,
-                color=colors[i],
-                marker="o",
-                s=30,
-                label=f"Literature T = {rp} years",
-            )
-
-    plt.xticks(tick_positions, tick_labels)
-    plt.xlabel("Duration (hours)", fontsize=12)
-    plt.ylabel("Intensity (mm/hr)", fontsize=12)
-    plt.title(f"IDF Curves Comparison: {model_tag} vs Literature", fontsize=14)
-    plt.grid(True)
-    if not np.isnan(overall_lit_rmse):
-        plt.text(
-            0.02,
-            0.98,
-            f"RMSE: {overall_lit_rmse:.4f}\nMAE: {overall_lit_mae:.4f}\nR²: {overall_lit_r2:.4f}\nNSE: {overall_lit_nse:.4f}",
-            transform=plt.gca().transAxes,
-            fontsize=12,
-            verticalalignment="top",
-            bbox=dict(boxstyle="round", facecolor="white", alpha=0.8),
-        )
-    plt.legend(loc="upper right", fontsize=9)
-    plt.tight_layout()
-    out_path2 = os.path.join(
-        os.path.dirname(__file__),
-        "..",
-        "figures",
-        f"idf_comparison_{out_prefix}_literature.png",
-    )
-    plt.savefig(out_path2, dpi=300)
-    print(f"Literature comparison plot saved to: {out_path2}")
-
-    # Original IDF curve plot using CSV data for consistency
+    # IDF curve plot using CSV data for consistency
     plt.figure(figsize=(10, 6))
     for return_period in return_periods:
         csv_durations = np.array(standard_durations_minutes)
@@ -665,12 +434,12 @@ def plot_idf_comparisons(
     )
     plt.legend()
     plt.tight_layout()
-    out_path3 = os.path.join(
+    out_path = os.path.join(
         os.path.dirname(__file__), "..", "figures", f"idf_curves_{out_prefix}.png"
     )
-    plt.savefig(out_path3, dpi=300)
+    plt.savefig(out_path, dpi=300)
     plt.show()
-    print(f"IDF curves plot saved to: {out_path3}")
+    print(f"IDF curves plot saved to: {out_path}")
 
 
 def plot_predictions_vs_observations(
