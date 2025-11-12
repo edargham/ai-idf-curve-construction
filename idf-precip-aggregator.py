@@ -6,18 +6,18 @@ def load_precipitation_data():
     """Load all precipitation data files and return processed dataframes."""
     # Define data file configurations
     data_configs = [
-        ("5mns", "gpm-bey-5mns.csv"),
-        ("10mns", "gpm-bey-10mns.csv"),
-        ("15mns", "gpm-bey-15mns.csv"),
-        ("30mns", "gpm-bey-30mns-imdf.csv"),
-        ("1h", "gpm-bey-1hr.csv"),
-        ("90min", "gpm-bey-90min.csv"),
-        ("2h", "gpm-bey-2hr.csv"),
-        ("3h", "gpm-bey-3hr.csv"),
-        ("6h", "gpm-bey-6hr.csv"),
-        ("12h", "gpm-bey-12hr.csv"),
-        ("15h", "gpm-bey-15hr.csv"),
-        ("18h", "gpm-bey-18hr.csv"),
+        ("5mns", "gpm-bey-5mns-bl.csv"),
+        ("10mns", "gpm-bey-10mns-bl.csv"),
+        ("15mns", "gpm-bey-15mns-bl.csv"),
+        ("30mns", "gpm-bey-30mns.csv"),
+        ("1h", "gpm-bey-1hr-bl.csv"),
+        ("90min", "gpm-bey-90min-bl.csv"),
+        ("2h", "gpm-bey-2hr-bl.csv"),
+        ("3h", "gpm-bey-3hr-bl.csv"),
+        ("6h", "gpm-bey-6hr-bl.csv"),
+        ("12h", "gpm-bey-12hr-bl.csv"),
+        ("15h", "gpm-bey-15hr-bl.csv"),
+        ("18h", "gpm-bey-18hr-bl.csv"),
         ("24h", "gpm-bey-daily.csv"),
     ]
 
