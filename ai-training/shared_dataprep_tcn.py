@@ -181,11 +181,12 @@ class SequentialIDFDataset(Dataset):
         print(f"✓ Created {len(self.windows):,} windows")
     
     def _generate_targets(self):
-        """Generate empirical return period intensities as targets."""
-        print("Generating targets from empirical return periods...", end=' ')
+        """Generate frequency factors as targets (not absolute intensities)."""
+        print("Generating frequency factor targets...", end=' ')
         
-        # For each duration, compute annual maxima from validation years
-        targets = []
+        # For each duration, compute mean, std, and frequency factors from annual maxima
+        frequency_factors = []
+        self.duration_stats = []  # Store mean and std for later use
         
         for dur_col in self.duration_cols:
             # Get validation data for this duration
@@ -203,6 +204,11 @@ class SequentialIDFDataset(Dataset):
             
             annual_maxima = np.array(annual_maxima)
             
+            # Compute statistics
+            mean_intensity = np.mean(annual_maxima)
+            std_intensity = np.std(annual_maxima)
+            self.duration_stats.append({'mean': mean_intensity, 'std': std_intensity})
+            
             # Rank and compute empirical return periods
             sorted_maxima = np.sort(annual_maxima)[::-1]  # Descending order
             n = len(sorted_maxima)
@@ -213,16 +219,13 @@ class SequentialIDFDataset(Dataset):
             rp_intensities = []
             for rp in self.return_periods:
                 if rp <= empirical_T.max() and rp >= empirical_T.min():
-                    # Interpolate in log-log space for better fit
                     intensity = np.exp(np.interp(np.log(rp), np.log(empirical_T[::-1]), 
                                                   np.log(sorted_maxima[::-1] + 1e-8)))
                 else:
-                    # Extrapolate linearly in log-log space
                     intensity = np.exp(np.interp(np.log(rp), np.log(empirical_T[::-1]), 
                                                   np.log(sorted_maxima[::-1] + 1e-8), 
                                                   left=np.nan, right=np.nan))
                     if np.isnan(intensity):
-                        # Use closest available value
                         if rp < empirical_T.min():
                             intensity = sorted_maxima[-1]
                         else:
@@ -230,40 +233,37 @@ class SequentialIDFDataset(Dataset):
                 
                 rp_intensities.append(intensity)
             
-            targets.append(rp_intensities)
+            # Convert intensities to frequency factors: K = (I - mean) / std
+            K_values = [(I - mean_intensity) / (std_intensity + 1e-8) for I in rp_intensities]
+            frequency_factors.append(K_values)
         
-        # targets is now [13 durations, 6 return periods]
-        self.targets = np.array(targets, dtype=np.float32)  # [13, 6]
+        # targets are now frequency factors [13 durations, 6 return periods]
+        self.targets = np.array(frequency_factors, dtype=np.float32)  # [13, 6]
         
-        # Bin windows by intensity quantiles and scale targets accordingly
-        # Compute max intensity across all durations for each window
+        # Bin windows by intensity quantiles to create variation
         window_max_intensities = np.max(self.windows, axis=(1, 2))  # [N]
         
-        # Create 6 quantile bins (one per return period level)
+        # Create 6 quantile bins
         quantiles = [0, 1/6, 2/6, 3/6, 4/6, 5/6, 1.0]
         intensity_thresholds = np.quantile(window_max_intensities, quantiles)
-        
-        # Assign each window to a bin (0=lowest → 5=highest intensity)
         window_rp_bins = np.digitize(window_max_intensities, intensity_thresholds[1:-1])  # [N]
         
-        # Create varied targets by scaling the base empirical IDF curve
-        # Windows in lower bins get scaled-down targets, higher bins get scaled-up targets
-        # This preserves the monotonic RP ordering while creating variation
+        # Create varied targets by adjusting frequency factors
+        # Higher bins get slightly higher K values (more extreme events)
         self.targets_per_window = np.zeros((len(self.windows), 13, 6), dtype=np.float32)
         
-        # Scale factors for each bin: [0.5, 0.7, 0.85, 1.0, 1.15, 1.3]
-        # These multiply the base empirical targets
-        bin_scale_factors = np.array([0.5, 0.7, 0.85, 1.0, 1.15, 1.3])
+        # Adjustment factors: shift K values based on bin
+        # [0.7, 0.85, 0.95, 1.0, 1.05, 1.15] - multiplicative scaling
+        bin_adjustments = np.array([0.7, 0.85, 0.95, 1.0, 1.05, 1.15])
         
         for i in range(len(self.windows)):
             bin_idx = window_rp_bins[i]
-            scale = bin_scale_factors[bin_idx]
-            # Scale the entire IDF curve uniformly - preserves RP ordering
-            self.targets_per_window[i] = self.targets * scale
+            adjustment = bin_adjustments[bin_idx]
+            # Scale frequency factors - monotonic ordering preserved
+            self.targets_per_window[i] = self.targets * adjustment
         
-        # Count distribution across bins
         bin_counts = np.bincount(window_rp_bins, minlength=6)
-        print(f"✓ Generated targets shape: {self.targets_per_window.shape}")
+        print(f"✓ Generated frequency factor targets shape: {self.targets_per_window.shape}")
         print(f"  Window distribution across RPs {self.return_periods}: {bin_counts}")
     
     def _create_scalers(self):

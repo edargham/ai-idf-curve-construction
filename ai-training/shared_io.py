@@ -227,35 +227,54 @@ def build_idf_from_direct_predictions(
     standard_durations_minutes,
     return_periods,
     csv_basename,
+    duration_stats=None,
 ):
     """
-    Build IDF curves from direct model predictions (Sequential TCN/TCAN).
+    Build IDF curves from frequency factor predictions (Sequential TCN/TCAN).
     
     Args:
-        predictions: np.array of shape [13, 6] - direct intensity predictions
+        predictions: np.array of shape [13, 6] - frequency factor predictions
         scaler_y: StandardScaler to inverse transform predictions
         standard_durations_minutes: List of 13 duration values
         return_periods: List of 6 return period values [2, 5, 10, 25, 50, 100]
         csv_basename: Output CSV filename
+        duration_stats: List of dicts with 'mean' and 'std' for each duration
     
     Returns:
         dict with idf_df, idf_curves, standard_idf_curves
     """
-    # Inverse transform predictions: [13, 6] -> scaled intensities -> original intensities
+    # Inverse transform frequency factors: [13, 6]
     predictions_flat = predictions.reshape(-1, 1)  # [78, 1]
-    predictions_unscaled = scaler_y.inverse_transform(predictions_flat)  # [78, 1]
-    predictions_unscaled = predictions_unscaled.reshape(13, 6)  # [13, 6]
+    K_factors = scaler_y.inverse_transform(predictions_flat)  # [78, 1]
+    K_factors = K_factors.reshape(13, 6)  # [13, 6]
     
-    # No frequency factors - predictions ARE the intensities
-    # predictions are already in mm/hr
+    # Convert frequency factors to intensities: intensity = mean + K * std
+    intensities_matrix = np.zeros((13, 6), dtype=np.float32)
+    
+    if duration_stats is not None:
+        for dur_idx in range(13):
+            mean_intensity = duration_stats[dur_idx]['mean']
+            std_intensity = duration_stats[dur_idx]['std']
+            for rp_idx in range(6):
+                K_val = K_factors[dur_idx, rp_idx]
+                intensities_matrix[dur_idx, rp_idx] = mean_intensity + K_val * std_intensity
+    else:
+        # Fallback: treat as intensities directly
+        intensities_matrix = K_factors
+    
+    # Ensure monotonic ordering: higher RP should have higher intensity
+    for dur_idx in range(13):
+        for rp_idx in range(1, 6):
+            if intensities_matrix[dur_idx, rp_idx] < intensities_matrix[dur_idx, rp_idx - 1]:
+                # Force monotonic increase
+                intensities_matrix[dur_idx, rp_idx] = intensities_matrix[dur_idx, rp_idx - 1] * 1.01
     
     # Build IDF curves dictionary: {return_period: [13 intensities]}
     idf_curves = {}
     standard_idf_curves = {}
     
     for rp_idx, rp in enumerate(return_periods):
-        # Extract intensities for this return period across all durations
-        intensities = predictions_unscaled[:, rp_idx]  # [13]
+        intensities = intensities_matrix[:, rp_idx]  # [13]
         idf_curves[rp] = intensities
         standard_idf_curves[rp] = intensities.tolist()
     

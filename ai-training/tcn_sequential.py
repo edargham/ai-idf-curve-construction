@@ -239,7 +239,8 @@ idf_artifacts = build_idf_from_direct_predictions(
     train_dataset_final.scaler_y,
     standard_durations_minutes,
     return_periods,
-    "idf_curves_TCN.csv"
+    "idf_curves_TCN.csv",
+    duration_stats=train_dataset_final.duration_stats
 )
 
 standard_idf_curves = idf_artifacts["standard_idf_curves"]
