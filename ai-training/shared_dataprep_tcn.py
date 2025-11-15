@@ -235,11 +235,36 @@ class SequentialIDFDataset(Dataset):
         # targets is now [13 durations, 6 return periods]
         self.targets = np.array(targets, dtype=np.float32)  # [13, 6]
         
-        # Replicate for all windows (same targets for all windows in this split)
-        # Each window predicts the same IDF curve structure
-        self.targets_per_window = np.tile(self.targets, (len(self.windows), 1, 1))  # [N, 13, 6]
+        # Bin windows by intensity quantiles and scale targets accordingly
+        # Compute max intensity across all durations for each window
+        window_max_intensities = np.max(self.windows, axis=(1, 2))  # [N]
         
+        # Create 6 quantile bins (one per return period level)
+        quantiles = [0, 1/6, 2/6, 3/6, 4/6, 5/6, 1.0]
+        intensity_thresholds = np.quantile(window_max_intensities, quantiles)
+        
+        # Assign each window to a bin (0=lowest → 5=highest intensity)
+        window_rp_bins = np.digitize(window_max_intensities, intensity_thresholds[1:-1])  # [N]
+        
+        # Create varied targets by scaling the base empirical IDF curve
+        # Windows in lower bins get scaled-down targets, higher bins get scaled-up targets
+        # This preserves the monotonic RP ordering while creating variation
+        self.targets_per_window = np.zeros((len(self.windows), 13, 6), dtype=np.float32)
+        
+        # Scale factors for each bin: [0.5, 0.7, 0.85, 1.0, 1.15, 1.3]
+        # These multiply the base empirical targets
+        bin_scale_factors = np.array([0.5, 0.7, 0.85, 1.0, 1.15, 1.3])
+        
+        for i in range(len(self.windows)):
+            bin_idx = window_rp_bins[i]
+            scale = bin_scale_factors[bin_idx]
+            # Scale the entire IDF curve uniformly - preserves RP ordering
+            self.targets_per_window[i] = self.targets * scale
+        
+        # Count distribution across bins
+        bin_counts = np.bincount(window_rp_bins, minlength=6)
         print(f"✓ Generated targets shape: {self.targets_per_window.shape}")
+        print(f"  Window distribution across RPs {self.return_periods}: {bin_counts}")
     
     def _create_scalers(self):
         """Create and fit scalers for sequences and targets."""
