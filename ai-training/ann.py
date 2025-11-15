@@ -26,6 +26,8 @@ from shared_optuna_tuning import (
     evaluate_pytorch_model
 )
 
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"  # Limit CUDA workspace for stability
+torch.use_deterministic_algorithms(True)  # Enforce deterministic algorithms in PyTorch
 # Reproducibility: set a global seed and stabilize RNGs
 SEED = 42
 set_seed(SEED)

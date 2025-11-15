@@ -348,7 +348,7 @@ def plot_idf_comparisons(
     Uses the same plotting logic as in the original files and saves images with names based on out_prefix.
     """
     # Set Times New Roman as the default font
-    plt.rcParams['font.family'] = 'Times New Roman'
+    # plt.rcParams['font.family'] = 'Times New Roman'
     
     # model_metrics: raw validation metrics from training/evaluation (rmse, mae, r2_model, nse)
     model_rmse, model_mae, model_r2, model_nse = (
@@ -455,7 +455,7 @@ def plot_predictions_vs_observations(
     - out_prefix: str, prefix for output filename
     - metrics: dict, optional metrics to display on plot (keys: rmse, mae, r2, nse)
     """
-    plt.rcParams['font.family'] = 'Times New Roman'
+    # plt.rcParams['font.family'] = 'Times New Roman'
 
     if len(y_true) == 0 or len(y_pred) == 0:
         print(f"Warning: No data available for {model_tag} predictions vs observations plot")

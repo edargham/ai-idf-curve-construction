@@ -25,6 +25,9 @@ from shared_optuna_tuning import (
     evaluate_pytorch_model
 )
 
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+torch.use_deterministic_algorithms(True)
+
 SEED = 42
 set_seed(SEED)
 
@@ -95,43 +98,55 @@ train_loader = DataLoader(
 )
 val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False) if val_dataset else None
 
-# Train final model with early stopping
+# Train final model with early stopping (MATCH OPTUNA TRAINING)
 optimizer = torch.optim.AdamW(
     final_model.parameters(), 
     lr=best_params['lr'], 
     weight_decay=best_params['weight_decay']
 )
-scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-    optimizer, T_0=50, T_mult=2
+# Use SAME scheduler as Optuna
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='max', factor=0.5, patience=25, min_lr=1e-7
 )
 criterion = nn.MSELoss()
 
 best_val_nse = -np.inf
-patience = 50
+best_weights = None
+patience = 80  # Match Optuna patience
 patience_counter = 0
-max_epochs = 300
+max_epochs = 400  # Match Optuna max_epochs
 
 print("\nTraining final TCAN model with best hyperparameters...")
 for epoch in range(max_epochs):
     train_loss = train_pytorch_epoch(final_model, train_loader, optimizer, criterion, device)
-    scheduler.step()
     
-    if val_loader and epoch % 10 == 0:
+    # Evaluate EVERY epoch like Optuna does
+    if val_loader:
         val_metrics = evaluate_pytorch_model(final_model, val_loader, device, scaler_y=scaler_y)
         val_nse = val_metrics['nse']
         
+        # Update scheduler with NSE (like Optuna)
+        scheduler.step(val_nse)
+        
         if val_nse > best_val_nse:
             best_val_nse = val_nse
+            best_weights = {k: v.cpu().clone() for k, v in final_model.state_dict().items()}
             patience_counter = 0
-            print(f"Epoch {epoch}: train_loss={train_loss:.6f}, val_nse={val_nse:.6f} (best)")
+            if epoch % 20 == 0 or epoch < 10:
+                print(f"Epoch {epoch}: train_loss={train_loss:.6f}, val_nse={val_nse:.6f} (best)")
         else:
-            patience_counter += 10
+            patience_counter += 1
             
         if patience_counter >= patience:
             print(f"Early stopping at epoch {epoch}")
             break
     elif epoch % 50 == 0:
         print(f"Epoch {epoch}: train_loss={train_loss:.6f}")
+
+# Restore best model weights before final evaluation
+if best_weights is not None:
+    final_model.load_state_dict(best_weights)
+    print(f"Restored best model weights (NSE = {best_val_nse:.6f})")
 
 # Evaluate final model (with inverse transform to get original scale metrics)
 final_metrics = evaluate_pytorch_model(final_model, val_loader, device, scaler_y=scaler_y)

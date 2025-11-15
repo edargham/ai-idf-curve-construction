@@ -273,15 +273,15 @@ def aggregate_data(dates, values, source_duration_min, target_duration_min):
 
 # Extract dates and precipitation values
 dates = df["date"].values
-precip_values = df["value"].values.astype(np.float64)
+intensities_30min = df["value"].values.astype(np.float64)  # Data is in mm/hr
 
-# Convert to intensity (mm/hr) - source data is 30-minute intervals
+# Convert from intensity (mm/hr) to total precipitation (mm) for 30-minute intervals
 source_duration_min = 30
 source_duration_hours = source_duration_min / 60.0
-intensities = precip_values / source_duration_hours
+precip_totals = intensities_30min * source_duration_hours  # mm/hr * 0.5 hr = mm
 
 # Count wet intervals for parameter fitting
-wet_intervals = np.sum(precip_values > 0.01)  # Threshold of 0.01 mm for wet intervals
+wet_intervals = np.sum(precip_totals > 0.005)  # Threshold of 0.005 mm for wet intervals
 
 print("Starting Bartlett-Lewis processing from 30-minute data...")
 print(f"Processing {len(df)} intervals ({len(df) * source_duration_hours / 24:.1f} days)")
@@ -289,7 +289,7 @@ print(f"Wet intervals: {wet_intervals} ({100*wet_intervals/len(df):.1f}%)")
 
 # Initialize and fit the Bartlett-Lewis model
 bl_model = BartlettLewisModel()
-bl_model.fit_parameters(precip_values, source_duration_hours, wet_intervals)
+bl_model.fit_parameters(precip_totals, source_duration_hours, wet_intervals)
 
 # Define disaggregation configurations (30min → finer resolutions)
 # Format: (duration_name, duration_minutes, filename)
@@ -320,7 +320,7 @@ for duration_name, duration_min, filename in disaggregation_configs:
     print(f"\nCreating {duration_name} dataset...")
     
     new_dates, new_values = bl_model.disaggregate_series(
-        dates, precip_values, source_duration_min, duration_min
+        dates, precip_totals, source_duration_min, duration_min
     )
     
     # Create DataFrame and save
@@ -332,7 +332,7 @@ for duration_name, duration_min, filename in disaggregation_configs:
     print(f"  - Max intensity: {df_new['value'].max():.3f} mm/hr")
     print(f"  - Mean intensity: {df_new['value'].mean():.3f} mm/hr")
     print(f"  - Total volume: {df_new['value'].sum() * duration_min / 60:.1f} mm")
-    print(f"  - Original total: {precip_values.sum():.1f} mm")
+    print(f"  - Original total: {precip_totals.sum():.1f} mm")
     print(f"  - Saved to: {filename}")
 
 # Process aggregated datasets (30min → coarser)
@@ -343,7 +343,7 @@ for duration_name, duration_min, filename in aggregation_configs:
     print(f"\nCreating {duration_name} dataset...")
     
     new_dates, new_values = aggregate_data(
-        dates, intensities, source_duration_min, duration_min
+        dates, intensities_30min, source_duration_min, duration_min
     )
     
     # Create DataFrame and save

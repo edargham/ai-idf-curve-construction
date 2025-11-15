@@ -287,7 +287,7 @@ def partial_duration_series_adjustment(df, lambda_threshold=2.0):
 print("Applying enhanced extreme event sampling...")
 
 # Method 1: Enhanced annual maxima (primary method)
-enhanced_annual_max = smart_annual_maxima_selection(df_intensity, n_events_per_year=3)
+enhanced_annual_max = smart_annual_maxima_selection(df_intensity, n_events_per_year=1)
 
 # Method 2: Partial duration series adjustment (secondary validation)
 pds_annual_max = partial_duration_series_adjustment(df_intensity, lambda_threshold=2.5)

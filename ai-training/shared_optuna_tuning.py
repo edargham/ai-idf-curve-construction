@@ -102,7 +102,7 @@ def evaluate_predictions(y_true, y_pred):
 # SVM Objective Function
 # ============================================================================
 
-def create_svm_objective(X_train_scaled, y_train_scaled, X_val_scaled, y_val_scaled):
+def create_svm_objective(X_train_scaled, y_train_scaled, X_val_scaled, y_val_scaled, scaler_y):
     """
     Create Optuna objective function for SVM hyperparameter tuning.
     
@@ -111,6 +111,7 @@ def create_svm_objective(X_train_scaled, y_train_scaled, X_val_scaled, y_val_sca
         y_train_scaled: Scaled training targets (numpy array)
         X_val_scaled: Scaled validation features (numpy array)
         y_val_scaled: Scaled validation targets (numpy array)
+        scaler_y: Scaler for inverse transforming targets (CRITICAL for proper NSE on original scale)
     
     Returns:
         objective function for Optuna
@@ -126,11 +127,23 @@ def create_svm_objective(X_train_scaled, y_train_scaled, X_val_scaled, y_val_sca
         model = SVR(C=C, epsilon=epsilon, gamma=gamma, kernel=kernel)
         model.fit(X_train_scaled, y_train_scaled)
         
-        # Predict on validation set
+        # Predict on validation set (scaled)
         y_pred_scaled = model.predict(X_val_scaled)
         
-        # Evaluate (maximize NSE)
-        metrics = evaluate_predictions(y_val_scaled, y_pred_scaled)
+        # Inverse transform to original scale for fair metric comparison
+        y_pred_log = scaler_y.inverse_transform(y_pred_scaled.reshape(-1, 1)).flatten()
+        y_val_log = scaler_y.inverse_transform(y_val_scaled.reshape(-1, 1)).flatten()
+        
+        # Transform from log-space to original intensity (mm/hr)
+        # Clip to prevent overflow
+        y_pred_log = np.clip(y_pred_log, -10, 15)
+        y_val_log = np.clip(y_val_log, -10, 15)
+        
+        y_pred_intensity = np.exp(y_pred_log)
+        y_val_intensity = np.exp(y_val_log)
+        
+        # Evaluate on original scale (maximize NSE)
+        metrics = evaluate_predictions(y_val_intensity, y_pred_intensity)
         
         # Log additional metrics
         trial.set_user_attr("rmse", metrics['rmse'])
@@ -170,10 +183,10 @@ def evaluate_pytorch_model(model, loader, device, scaler_y=None):
         model: PyTorch model
         loader: DataLoader
         device: torch device
-        scaler_y: Optional scaler to inverse transform predictions
+        scaler_y: Optional scaler to inverse transform predictions (transforms from scaled to log-space)
     
     Returns:
-        dict with metrics (nse, rmse, mae, r2)
+        dict with metrics (nse, rmse, mae, r2) computed on ORIGINAL SCALE (mm/hr)
     """
     model.eval()
     all_preds = []
@@ -189,10 +202,19 @@ def evaluate_pytorch_model(model, loader, device, scaler_y=None):
     preds = torch.cat(all_preds).numpy().flatten()
     trues = torch.cat(all_trues).numpy().flatten()
     
-    # Inverse transform if scaler provided
+    # Inverse transform if scaler provided (scaled log-intensity → log-intensity)
     if scaler_y is not None:
         preds = scaler_y.inverse_transform(preds.reshape(-1, 1)).flatten()
         trues = scaler_y.inverse_transform(trues.reshape(-1, 1)).flatten()
+        
+        # Transform from log-space to original intensity (mm/hr)
+        # Clip to prevent overflow: log-intensity typically ranges from -2 to 8
+        # exp(20) ≈ 485 million mm/hr is physically unrealistic (cap at exp(15) ≈ 3.3M mm/hr)
+        preds = np.clip(preds, -10, 15)  # Prevent numerical overflow
+        trues = np.clip(trues, -10, 15)
+        
+        preds = np.exp(preds)
+        trues = np.exp(trues)
     
     return evaluate_predictions(trues, preds)
 
@@ -319,63 +341,109 @@ def create_ann_objective(X_train_scaled, y_train_scaled, X_val_scaled, y_val_sca
 # ============================================================================
 
 class TemporalBlock(nn.Module):
-    """Temporal block for TCN with causal convolutions and residual connections."""
+    """Simplified temporal block with single-scale convolution and residual connections.
+    
+    Uses a straightforward architecture focused on learning the temporal patterns
+    without unnecessary complexity that can hinder convergence.
+    """
     def __init__(self, in_channels, out_channels, kernel_size=3, dropout=0.01):
-        super().__init__()
-        padding = (kernel_size - 1)
+        super(TemporalBlock, self).__init__()
         
+        padding = (kernel_size - 1) // 2  # same padding
+        
+        # Two conv layers with batch norm
         self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size, padding=padding)
+        self.bn1 = nn.BatchNorm1d(out_channels)
         self.relu1 = nn.ReLU()
         self.dropout1 = nn.Dropout(dropout)
         
         self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size, padding=padding)
-        self.relu2 = nn.ReLU()
-        self.dropout2 = nn.Dropout(dropout)
+        self.bn2 = nn.BatchNorm1d(out_channels)
         
+        # Residual connection
         self.downsample = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else None
-        self.relu = nn.ReLU()
-    
+        self.relu_out = nn.ReLU()
+        
     def forward(self, x):
+        # Save input for residual
+        identity = x
+        
+        # First conv block
         out = self.conv1(x)
-        out = out[:, :, :-self.conv1.padding[0]] if self.conv1.padding[0] > 0 else out
+        out = self.bn1(out)
         out = self.relu1(out)
         out = self.dropout1(out)
         
+        # Second conv block
         out = self.conv2(out)
-        out = out[:, :, :-self.conv2.padding[0]] if self.conv2.padding[0] > 0 else out
-        out = self.relu2(out)
-        out = self.dropout2(out)
+        out = self.bn2(out)
         
-        res = x if self.downsample is None else self.downsample(x)
-        return self.relu(out + res)
+        # Residual connection
+        if self.downsample is not None:
+            identity = self.downsample(identity)
+        
+        # Add residual and activate
+        return self.relu_out(out + identity)
 
 
 class TCN(nn.Module):
     """Temporal Convolutional Network for regression."""
     def __init__(self, seq_len=2, num_filters=144, kernel_size=3, dropout=0.01, num_levels=2):
-        super().__init__()
+        super(TCN, self).__init__()
         self.seq_len = seq_len
         
+        # Simplified 2-level architecture with gradual channel expansion
         layers = []
-        in_channels = seq_len
-        for _ in range(num_levels):
-            layers.append(TemporalBlock(in_channels, num_filters, kernel_size, dropout))
-            in_channels = num_filters
+        in_channels = 1
+        for i in range(num_levels):
+            out_channels = num_filters * (2 ** i)
+            layers.append(TemporalBlock(
+                in_channels, out_channels, kernel_size, dropout
+            ))
+            in_channels = out_channels
         
         self.network = nn.Sequential(*layers)
-        self.fc = nn.Linear(num_filters, 1)
-    
+        
+        # Global average pooling for consistent output
+        self.global_pool = nn.AdaptiveAvgPool1d(1)
+        
+        # Simplified fully connected layers with minimal dropout
+        final_channels = num_filters * (2 ** (num_levels - 1))
+        self.fc1 = nn.Linear(final_channels, final_channels * 2)
+        self.bn_fc1 = nn.BatchNorm1d(final_channels * 2)
+        self.relu_fc1 = nn.ReLU()
+        self.dropout_fc1 = nn.Dropout(dropout * 0.1)
+        
+        self.fc2 = nn.Linear(final_channels * 2, final_channels)
+        self.bn_fc2 = nn.BatchNorm1d(final_channels)
+        self.relu_fc2 = nn.ReLU()
+        
+        self.fc3 = nn.Linear(final_channels, 1)
+
     def forward(self, x):
-        # x: (batch, seq_len) -> (batch, seq_len, 1) for treating features as channels
-        x = x.unsqueeze(-1)
-        # Transpose to (batch, 1, seq_len) -> Wait, NO! We want (batch, seq_len, 1) to be (batch, in_channels=seq_len, seq_length=1)
-        # Actually for Conv1d: input is (batch, channels, length)
-        # We have seq_len features, so they should be channels
-        # So: (batch, seq_len) -> add length dimension -> (batch, seq_len, 1)
-        # This gives us (batch, channels=seq_len, length=1)
+        # x shape: (batch_size, 1, seq_len) or (batch_size, seq_len)
+        if x.dim() == 2:
+            x = x.unsqueeze(1)  # add channel dimension -> (batch, 1, seq_len)
+        
+        # Temporal feature extraction
         x = self.network(x)
-        x = x[:, :, -1]  # Take last time step (last position in sequence)
-        return self.fc(x)
+        
+        # Global pooling
+        x = self.global_pool(x).squeeze(-1)
+        
+        # Fully connected layers
+        x = self.fc1(x)
+        x = self.bn_fc1(x)
+        x = self.relu_fc1(x)
+        x = self.dropout_fc1(x)
+        
+        x = self.fc2(x)
+        x = self.bn_fc2(x)
+        x = self.relu_fc2(x)
+        
+        x = self.fc3(x)
+        
+        return x
 
 
 def create_tcn_objective(X_train_scaled, y_train_scaled, X_val_scaled, y_val_scaled,
@@ -398,17 +466,25 @@ def create_tcn_objective(X_train_scaled, y_train_scaled, X_val_scaled, y_val_sca
     def objective(trial):
         set_seed(SEED)
         
-        # Suggest hyperparameters - AGGRESSIVE SEARCH SPACE FOR NSE > 0.95
-        num_filters = trial.suggest_categorical("num_filters", [128, 192, 256, 384, 512, 640, 768])
-        kernel_size = trial.suggest_int("kernel_size", 2, 9)  # Include smaller and larger
-        dropout = trial.suggest_float("dropout", 0.0, 0.3)  # Allow NO dropout
-        num_levels = trial.suggest_int("num_levels", 1, 5)  # Include shallow nets
-        lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)  # Much wider range
-        batch_size = trial.suggest_categorical("batch_size", [8, 16, 32, 64, 128])
-        weight_decay = trial.suggest_float("weight_decay", 1e-7, 1e-2, log=True)
+        # Suggest hyperparameters - ALIGNED WITH SUCCESSFUL OLD VERSION
+        # Old version used: hidden_candidates = [144, 160, 176, 192]
+        # lr=8e-4, weight_decay=1e-6, batch_size=64, epochs=300, kernel_size=3, dropout=0.01, num_levels=2
+        num_filters = trial.suggest_categorical("num_filters", [128, 144, 160, 176, 192, 208, 224, 256])
+        
+        # Constrain kernel_size based on sequence length to avoid padding issues
+        # For seq_len=2, max safe kernel_size is 3
+        seq_len = X_train_scaled.shape[1]
+        max_kernel = min(5, seq_len + 1)  # Conservative: kernel can be at most seq_len + 1
+        kernel_size = trial.suggest_int("kernel_size", 3, max_kernel) if max_kernel >= 3 else 3
+        
+        dropout = trial.suggest_float("dropout", 0.005, 0.05)  # Centered around 0.01
+        num_levels = trial.suggest_int("num_levels", 2, 4)  # Start with 2 (original)
+        lr = trial.suggest_float("lr", 5e-4, 2e-3, log=True)  # Centered around 8e-4
+        batch_size = trial.suggest_categorical("batch_size", [32, 64, 128])  # Default 64
+        weight_decay = trial.suggest_float("weight_decay", 1e-7, 1e-5, log=True)  # Centered around 1e-6
         
         # Create model
-        model = TCN(seq_len=X_train_scaled.shape[1],
+        model = TCN(seq_len=seq_len,
                     num_filters=num_filters,
                     kernel_size=kernel_size,
                     dropout=dropout,
@@ -416,8 +492,9 @@ def create_tcn_objective(X_train_scaled, y_train_scaled, X_val_scaled, y_val_sca
         
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
         criterion = nn.MSELoss()
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-            optimizer, T_0=30, T_mult=2, eta_min=1e-7
+        # More aggressive scheduler for better convergence
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='max', factor=0.5, patience=20, min_lr=1e-7
         )
         
         # Create data loaders
@@ -430,19 +507,30 @@ def create_tcn_objective(X_train_scaled, y_train_scaled, X_val_scaled, y_val_sca
         val_ds = TensorRegressionDataset(X_val_scaled, y_val_scaled)
         val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
         
-        # Early stopping - INCREASED PATIENCE
+        # Early stopping - MATCH OLD VERSION TRAINING REGIME
         best_val_nse = -np.inf
-        patience = 100
+        patience = 80  # Reasonable for focused search space
         patience_counter = 0
         
         # Training loop
         for epoch in range(max_epochs):
             train_pytorch_epoch(model, train_loader, optimizer, criterion, device)
-            scheduler.step()
             
             # Evaluate on validation - WITH INVERSE TRANSFORM FOR PROPER NSE
-            metrics = evaluate_pytorch_model(model, val_loader, device, scaler_y=scaler_y)
-            val_nse = metrics['nse']
+            try:
+                metrics = evaluate_pytorch_model(model, val_loader, device, scaler_y=scaler_y)
+                val_nse = metrics['nse']
+                
+                # Check for numerical issues (divergence)
+                if not np.isfinite(val_nse):
+                    raise optuna.TrialPruned()
+                    
+            except (ValueError, RuntimeWarning, FloatingPointError):
+                # Model diverged (overflow/underflow) - prune trial
+                raise optuna.TrialPruned()
+            
+            # Update scheduler based on validation NSE
+            scheduler.step(val_nse)
             
             # Early stopping check
             if val_nse > best_val_nse:
@@ -477,86 +565,147 @@ def create_tcn_objective(X_train_scaled, y_train_scaled, X_val_scaled, y_val_sca
 # ============================================================================
 
 class MHSA1d(nn.Module):
-    """Multi-Head Self-Attention for 1D sequences."""
-    def __init__(self, channels, num_heads=8, dropout=0.05):
-        super().__init__()
-        self.num_heads = num_heads
-        self.mha = nn.MultiheadAttention(channels, num_heads, dropout=dropout, batch_first=True)
-        self.norm = nn.LayerNorm(channels)
-        self.dropout = nn.Dropout(dropout)
+    """Multi-Head Self-Attention over 1D feature maps.
     
-    def forward(self, x):
+    Treats the length dimension (L) as the token axis and the channel dimension (C)
+    as the embedding size. Input/Output shape: (B, C, L).
+    """
+    def __init__(self, channels: int, num_heads: int = 8, dropout: float = 0.05):
+        super().__init__()
+        # Ensure num_heads divides channels; if not, fallback to the largest divisor <= num_heads
+        nh = max(1, min(num_heads, channels))
+        for h in range(min(num_heads, channels), 0, -1):
+            if channels % h == 0:
+                nh = h
+                break
+        self.num_heads = nh
+        self.embed_dim = channels
+        self.attn = nn.MultiheadAttention(
+            embed_dim=self.embed_dim, num_heads=self.num_heads, dropout=dropout, batch_first=True
+        )
+        self.ln1 = nn.LayerNorm(self.embed_dim)
+        self.ln2 = nn.LayerNorm(self.embed_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: (B, C, L) -> (B, L, C)
-        x = x.transpose(1, 2)
-        attn_out, _ = self.mha(x, x, x)
-        x = self.norm(x + self.dropout(attn_out))
-        # (B, L, C) -> (B, C, L)
-        return x.transpose(1, 2)
+        x_seq = x.permute(0, 2, 1)
+        x_norm = self.ln1(x_seq)
+        attn_out, _ = self.attn(x_norm, x_norm, x_norm, need_weights=False)
+        x_res = x_seq + self.dropout(attn_out)
+        x_res = self.ln2(x_res)
+        # Back to (B, C, L)
+        return x_res.permute(0, 2, 1)
 
 
 class TemporalBlockWithAttention(nn.Module):
-    """Temporal block with optional self-attention."""
-    def __init__(self, in_channels, out_channels, kernel_size=3, dropout=0.01, 
-                 attn_heads=0, attn_dropout=0.05):
-        super().__init__()
-        padding = (kernel_size - 1)
-        
+    """Simplified temporal block with residual convs and optional self-attention."""
+    def __init__(self, in_channels, out_channels, kernel_size=3, dropout=0.01, attn_heads: int = 0, attn_dropout: float = 0.05):
+        super(TemporalBlockWithAttention, self).__init__()
+
+        padding = (kernel_size - 1) // 2  # same padding
+
+        # Two conv layers with batch norm
         self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size, padding=padding)
+        self.bn1 = nn.BatchNorm1d(out_channels)
         self.relu1 = nn.ReLU()
         self.dropout1 = nn.Dropout(dropout)
-        
+
         self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size, padding=padding)
-        self.relu2 = nn.ReLU()
-        self.dropout2 = nn.Dropout(dropout)
-        
-        self.attn = MHSA1d(out_channels, attn_heads, attn_dropout) if attn_heads > 0 else None
-        
+        self.bn2 = nn.BatchNorm1d(out_channels)
+
+        # Residual connection
         self.downsample = nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else None
-        self.relu = nn.ReLU()
-    
+        self.relu_out = nn.ReLU()
+
+        # Optional attention after residual fusion
+        self.attn = MHSA1d(out_channels, num_heads=attn_heads, dropout=attn_dropout) if attn_heads and attn_heads > 0 else None
+
     def forward(self, x):
+        identity = x
+
+        # First conv block
         out = self.conv1(x)
-        out = out[:, :, :-self.conv1.padding[0]] if self.conv1.padding[0] > 0 else out
+        out = self.bn1(out)
         out = self.relu1(out)
         out = self.dropout1(out)
-        
+
+        # Second conv block
         out = self.conv2(out)
-        out = out[:, :, :-self.conv2.padding[0]] if self.conv2.padding[0] > 0 else out
-        out = self.relu2(out)
-        out = self.dropout2(out)
-        
+        out = self.bn2(out)
+
+        # Residual connection
+        if self.downsample is not None:
+            identity = self.downsample(identity)
+
+        out = self.relu_out(out + identity)
+
+        # Self-attention refinement (keeps shape)
         if self.attn is not None:
             out = self.attn(out)
-        
-        res = x if self.downsample is None else self.downsample(x)
-        return self.relu(out + res)
+
+        return out
 
 
 class TCAN(nn.Module):
     """Temporal Convolutional Attention Network for regression."""
     def __init__(self, seq_len=2, num_filters=144, kernel_size=3, dropout=0.01, 
                  num_levels=2, attn_heads=8, attn_dropout=0.05):
-        super().__init__()
+        super(TCAN, self).__init__()
         self.seq_len = seq_len
         
+        # Simplified 2-level architecture with gradual channel expansion
         layers = []
-        in_channels = seq_len
-        for _ in range(num_levels):
+        in_channels = 1
+        for i in range(num_levels):
+            out_channels = num_filters * (2 ** i)
             layers.append(TemporalBlockWithAttention(
-                in_channels, num_filters, kernel_size, dropout, attn_heads, attn_dropout
+                in_channels, out_channels, kernel_size, dropout, attn_heads=attn_heads, attn_dropout=attn_dropout
             ))
-            in_channels = num_filters
+            in_channels = out_channels
         
         self.network = nn.Sequential(*layers)
-        self.fc = nn.Linear(num_filters, 1)
-    
+        
+        # Global average pooling for consistent output
+        self.global_pool = nn.AdaptiveAvgPool1d(1)
+        
+        # Simplified fully connected layers with minimal dropout
+        final_channels = num_filters * (2 ** (num_levels - 1))
+        self.fc1 = nn.Linear(final_channels, final_channels * 2)
+        self.bn_fc1 = nn.BatchNorm1d(final_channels * 2)
+        self.relu_fc1 = nn.ReLU()
+        self.dropout_fc1 = nn.Dropout(dropout * 0.1)
+        
+        self.fc2 = nn.Linear(final_channels * 2, final_channels)
+        self.bn_fc2 = nn.BatchNorm1d(final_channels)
+        self.relu_fc2 = nn.ReLU()
+        
+        self.fc3 = nn.Linear(final_channels, 1)
+
     def forward(self, x):
-        # x: (batch, seq_len) -> (batch, seq_len, 1) for treating features as channels
-        # Conv1d expects (batch, channels, length), so seq_len features become channels
-        x = x.unsqueeze(-1)
+        # x shape: (batch_size, 1, seq_len) or (batch_size, seq_len)
+        if x.dim() == 2:
+            x = x.unsqueeze(1)  # add channel dimension -> (batch, 1, seq_len)
+        
+        # Temporal feature extraction
         x = self.network(x)
-        x = x[:, :, -1]  # Take last time step (last position in sequence)
-        return self.fc(x)
+        
+        # Global pooling
+        x = self.global_pool(x).squeeze(-1)
+        
+        # Fully connected layers
+        x = self.fc1(x)
+        x = self.bn_fc1(x)
+        x = self.relu_fc1(x)
+        x = self.dropout_fc1(x)
+        
+        x = self.fc2(x)
+        x = self.bn_fc2(x)
+        x = self.relu_fc2(x)
+        
+        x = self.fc3(x)
+        
+        return x
 
 
 def create_tcan_objective(X_train_scaled, y_train_scaled, X_val_scaled, y_val_scaled,
@@ -579,19 +728,33 @@ def create_tcan_objective(X_train_scaled, y_train_scaled, X_val_scaled, y_val_sc
     def objective(trial):
         set_seed(SEED)
         
-        # Suggest hyperparameters - AGGRESSIVE SEARCH SPACE FOR NSE > 0.96
-        num_filters = trial.suggest_categorical("num_filters", [192, 256, 384, 512, 640, 768, 896])
-        kernel_size = trial.suggest_int("kernel_size", 2, 9)  # Include smaller and larger
-        dropout = trial.suggest_float("dropout", 0.0, 0.35)  # Allow NO dropout, higher ceiling
-        num_levels = trial.suggest_int("num_levels", 1, 6)  # Include shallow and very deep
-        attn_heads = trial.suggest_categorical("attn_heads", [2, 4, 6, 8, 12, 16])  # More variety
-        attn_dropout = trial.suggest_float("attn_dropout", 0.0, 0.35)  # Allow NO dropout
-        lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)  # Much wider range
-        batch_size = trial.suggest_categorical("batch_size", [8, 16, 32, 64, 128])
-        weight_decay = trial.suggest_float("weight_decay", 1e-7, 1e-2, log=True)
+        # Suggest hyperparameters - ALIGNED WITH SUCCESSFUL OLD TCAN VERSION
+        # Old version used: hidden_candidates = [144, 160, 176, 192]
+        # attn_heads=8, attn_dropout=0.05, lr=8e-4, batch_size=64, kernel_size=3, dropout=0.01, num_levels=2
+        attn_heads = trial.suggest_categorical("attn_heads", [4, 8, 16])  # Centered around 8
+        
+        # num_filters must be divisible by attn_heads for MultiheadAttention
+        # Focus on moderate sizes that worked in old version
+        all_filters = [128, 144, 160, 176, 192, 208, 224, 256, 288, 320, 352, 384]
+        
+        # Filter based on divisibility by attn_heads
+        valid_filters = [f for f in all_filters if f % attn_heads == 0]
+        num_filters = trial.suggest_categorical("num_filters", valid_filters)
+        
+        # Constrain kernel_size based on sequence length to avoid padding issues
+        seq_len = X_train_scaled.shape[1]
+        max_kernel = min(5, seq_len + 1)  # Conservative: kernel can be at most seq_len + 1
+        kernel_size = trial.suggest_int("kernel_size", 3, max_kernel) if max_kernel >= 3 else 3
+        
+        dropout = trial.suggest_float("dropout", 0.005, 0.05)  # Centered around 0.01
+        num_levels = trial.suggest_int("num_levels", 2, 4)  # Start with 2 (original)
+        attn_dropout = trial.suggest_float("attn_dropout", 0.02, 0.1)  # Centered around 0.05
+        lr = trial.suggest_float("lr", 5e-4, 2e-3, log=True)  # Centered around 8e-4
+        batch_size = trial.suggest_categorical("batch_size", [32, 64, 128])  # Default 64
+        weight_decay = trial.suggest_float("weight_decay", 1e-7, 1e-5, log=True)  # Centered around 1e-6
         
         # Create model
-        model = TCAN(seq_len=X_train_scaled.shape[1],
+        model = TCAN(seq_len=seq_len,
                      num_filters=num_filters,
                      kernel_size=kernel_size,
                      dropout=dropout,
@@ -601,8 +764,9 @@ def create_tcan_objective(X_train_scaled, y_train_scaled, X_val_scaled, y_val_sc
         
         optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
         criterion = nn.MSELoss()
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-            optimizer, T_0=30, T_mult=2, eta_min=1e-7
+        # Use ReduceLROnPlateau for adaptive learning based on validation performance
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='max', factor=0.5, patience=25, min_lr=1e-7
         )
         
         # Create data loaders
@@ -615,19 +779,30 @@ def create_tcan_objective(X_train_scaled, y_train_scaled, X_val_scaled, y_val_sc
         val_ds = TensorRegressionDataset(X_val_scaled, y_val_scaled)
         val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
         
-        # Early stopping - INCREASED PATIENCE
+        # Early stopping - MATCH OLD VERSION TRAINING REGIME
         best_val_nse = -np.inf
-        patience = 100
+        patience = 80  # Reasonable for focused search space
         patience_counter = 0
         
         # Training loop
         for epoch in range(max_epochs):
             train_pytorch_epoch(model, train_loader, optimizer, criterion, device)
-            scheduler.step()
             
             # Evaluate on validation - WITH INVERSE TRANSFORM FOR PROPER NSE
-            metrics = evaluate_pytorch_model(model, val_loader, device, scaler_y=scaler_y)
-            val_nse = metrics['nse']
+            try:
+                metrics = evaluate_pytorch_model(model, val_loader, device, scaler_y=scaler_y)
+                val_nse = metrics['nse']
+                
+                # Check for numerical issues (divergence)
+                if not np.isfinite(val_nse):
+                    raise optuna.TrialPruned()
+                    
+            except (ValueError, RuntimeWarning, FloatingPointError):
+                # Model diverged (overflow/underflow) - prune trial
+                raise optuna.TrialPruned()
+            
+            # Update scheduler based on validation NSE
+            scheduler.step(val_nse)
             
             # Early stopping check
             if val_nse > best_val_nse:

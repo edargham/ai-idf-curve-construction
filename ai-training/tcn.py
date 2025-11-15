@@ -24,7 +24,8 @@ from shared_optuna_tuning import (
     train_pytorch_epoch,
     evaluate_pytorch_model
 )
-
+os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+torch.use_deterministic_algorithms(True)
 
 # Reproducibility: set a global seed and stabilize RNGs
 SEED = 42
@@ -82,8 +83,9 @@ optimizer = torch.optim.AdamW(
     weight_decay=best_params['weight_decay']
 )
 criterion = nn.MSELoss()
-scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-    optimizer, T_0=50, T_mult=2, eta_min=1e-7
+# Use SAME scheduler as Optuna
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, mode='max', factor=0.5, patience=20, min_lr=1e-7
 )
 
 # Create reproducible data loader
@@ -101,20 +103,22 @@ train_loader = DataLoader(
 val_ds = TensorRegressionDataset(X_val_scaled, y_val_scaled)
 val_loader = DataLoader(val_ds, batch_size=best_params['batch_size'], shuffle=False)
 
-# Training loop with early stopping
+# Training loop with early stopping - MATCH OPTUNA SETTINGS
 best_val_nse = -np.inf
 best_weights = None
-patience = 100
+patience = 80  # Match Optuna patience
 patience_counter = 0
-num_epochs = 600
+num_epochs = 400  # Match Optuna max_epochs
 
 for epoch in range(1, num_epochs + 1):
     train_loss = train_pytorch_epoch(final_model, train_loader, optimizer, criterion, device)
-    scheduler.step()
     
     # Evaluate on validation (with inverse transform to get original scale metrics)
     val_metrics = evaluate_pytorch_model(final_model, val_loader, device, scaler_y=scaler_y)
     val_nse = val_metrics['nse']
+    
+    # Update scheduler with NSE (like Optuna)
+    scheduler.step(val_nse)
     
     # Early stopping
     if val_nse > best_val_nse:

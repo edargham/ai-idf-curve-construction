@@ -62,7 +62,7 @@ y_val_scaled = scaler_y.transform(y_val.values.reshape(-1,1)).flatten() if y_val
 
 # Run Optuna hyperparameter tuning
 print('Starting Optuna hyperparameter tuning on training/validation split...')
-svm_objective = create_svm_objective(X_train_scaled, y_train_scaled, X_val_scaled, y_val_scaled)
+svm_objective = create_svm_objective(X_train_scaled, y_train_scaled, X_val_scaled, y_val_scaled, scaler_y)
 study = run_optuna_study(svm_objective, "SVM", n_trials=100, direction="maximize")
 
 # Save Optuna results
