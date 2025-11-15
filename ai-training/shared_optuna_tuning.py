@@ -219,6 +219,67 @@ def evaluate_pytorch_model(model, loader, device, scaler_y=None):
     return evaluate_predictions(trues, preds)
 
 
+def train_sequential_epoch(model, loader, optimizer, criterion, device):
+    """Train sequential model for one epoch."""
+    model.train()
+    total_loss = 0.0
+    for xb, yb in loader:
+        xb, yb = xb.to(device), yb.to(device)  # [batch, 13, seq_len], [batch, 13, 6]
+        optimizer.zero_grad()
+        out = model(xb)  # [batch, 13, 6]
+        loss = criterion(out, yb)
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item() * len(xb)
+    return total_loss / len(loader.dataset)
+
+
+def evaluate_sequential_model(model, loader, device, scaler_y=None):
+    """
+    Evaluate sequential model on a dataset.
+    
+    Args:
+        model: Sequential TCN/TCAN model
+        loader: DataLoader returning ([batch, 13, seq_len], [batch, 13, 6])
+        device: torch device
+        scaler_y: Optional scaler to inverse transform predictions
+    
+    Returns:
+        dict with metrics (nse, rmse, mae, r2) averaged across all outputs
+    """
+    model.eval()
+    all_preds = []
+    all_trues = []
+    
+    with torch.no_grad():
+        for xb, yb in loader:
+            xb = xb.to(device)
+            out = model(xb)  # [batch, 13, 6]
+            all_preds.append(out.cpu())
+            all_trues.append(yb)
+    
+    preds = torch.cat(all_preds).numpy()  # [N, 13, 6]
+    trues = torch.cat(all_trues).numpy()  # [N, 13, 6]
+    
+    # Inverse transform if scaler provided
+    if scaler_y is not None:
+        # Flatten, transform, reshape
+        preds_flat = preds.reshape(-1, 1)
+        trues_flat = trues.reshape(-1, 1)
+        
+        preds_flat = scaler_y.inverse_transform(preds_flat)
+        trues_flat = scaler_y.inverse_transform(trues_flat)
+        
+        preds = preds_flat.reshape(preds.shape)
+        trues = trues_flat.reshape(trues.shape)
+    
+    # Flatten all predictions and targets for metric computation
+    preds_flat = preds.flatten()
+    trues_flat = trues.flatten()
+    
+    return evaluate_predictions(trues_flat, preds_flat)
+
+
 # ============================================================================
 # ANN (MLP) Objective Function
 # ============================================================================
@@ -384,6 +445,164 @@ class TemporalBlock(nn.Module):
         
         # Add residual and activate
         return self.relu_out(out + identity)
+
+
+class SequentialTCN(nn.Module):
+    """
+    Temporal Convolutional Network for sequential IDF prediction.
+    
+    Takes multi-channel time-series input [batch, 13_durations, seq_len]
+    Outputs IDF predictions [batch, 13_durations, 6_return_periods]
+    """
+    def __init__(self, num_channels=13, seq_len=256, num_filters=64, 
+                 kernel_size=3, dropout=0.2, num_levels=4):
+        super(SequentialTCN, self).__init__()
+        self.num_channels = num_channels
+        self.seq_len = seq_len
+        self.num_durations = 13
+        self.num_return_periods = 6
+        
+        # TCN layers - process each duration channel
+        layers = []
+        in_ch = num_channels
+        for i in range(num_levels):
+            out_ch = num_filters * (2 ** min(i, 2))  # Cap at 4x for memory
+            layers.append(TemporalBlock(in_ch, out_ch, kernel_size, dropout))
+            in_ch = out_ch
+        
+        self.tcn_network = nn.Sequential(*layers)
+        
+        # Global pooling to reduce temporal dimension
+        self.global_pool = nn.AdaptiveAvgPool1d(1)
+        
+        # Final channel count
+        final_channels = num_filters * (2 ** min(num_levels - 1, 2))
+        
+        # Fully connected layers for regression
+        self.fc1 = nn.Linear(final_channels, final_channels * 2)
+        self.bn1 = nn.BatchNorm1d(final_channels * 2)
+        self.relu1 = nn.ReLU()
+        self.dropout1 = nn.Dropout(dropout * 0.5)
+        
+        self.fc2 = nn.Linear(final_channels * 2, final_channels)
+        self.bn2 = nn.BatchNorm1d(final_channels)
+        self.relu2 = nn.ReLU()
+        self.dropout2 = nn.Dropout(dropout * 0.5)
+        
+        # Output layer: 78 values (13 durations × 6 return periods)
+        self.fc_out = nn.Linear(final_channels, self.num_durations * self.num_return_periods)
+    
+    def forward(self, x):
+        """
+        Args:
+            x: [batch, 13, seq_len] - multi-channel time-series
+        
+        Returns:
+            [batch, 13, 6] - IDF predictions
+        """
+        # TCN feature extraction
+        x = self.tcn_network(x)  # [batch, final_channels, reduced_seq]
+        
+        # Global pooling
+        x = self.global_pool(x).squeeze(-1)  # [batch, final_channels]
+        
+        # Fully connected layers
+        x = self.fc1(x)
+        x = self.bn1(x)
+        x = self.relu1(x)
+        x = self.dropout1(x)
+        
+        x = self.fc2(x)
+        x = self.bn2(x)
+        x = self.relu2(x)
+        x = self.dropout2(x)
+        
+        # Output
+        x = self.fc_out(x)  # [batch, 78]
+        
+        # Reshape to [batch, 13, 6]
+        return x.view(-1, self.num_durations, self.num_return_periods)
+
+
+class SequentialTCAN(nn.Module):
+    """
+    Temporal Convolutional Attention Network for sequential IDF prediction.
+    
+    Takes multi-channel time-series input [batch, 13_durations, seq_len]
+    Outputs IDF predictions [batch, 13_durations, 6_return_periods]
+    """
+    def __init__(self, num_channels=13, seq_len=256, num_filters=64, 
+                 kernel_size=3, dropout=0.2, num_levels=4, 
+                 attn_heads=8, attn_dropout=0.1):
+        super(SequentialTCAN, self).__init__()
+        self.num_channels = num_channels
+        self.seq_len = seq_len
+        self.num_durations = 13
+        self.num_return_periods = 6
+        
+        # TCN layers with attention - process each duration channel
+        layers = []
+        in_ch = num_channels
+        for i in range(num_levels):
+            out_ch = num_filters * (2 ** min(i, 2))  # Cap at 4x for memory
+            layers.append(TemporalBlockWithAttention(
+                in_ch, out_ch, kernel_size, dropout, 
+                attn_heads=attn_heads, attn_dropout=attn_dropout
+            ))
+            in_ch = out_ch
+        
+        self.tcan_network = nn.Sequential(*layers)
+        
+        # Global pooling to reduce temporal dimension
+        self.global_pool = nn.AdaptiveAvgPool1d(1)
+        
+        # Final channel count
+        final_channels = num_filters * (2 ** min(num_levels - 1, 2))
+        
+        # Fully connected layers for regression
+        self.fc1 = nn.Linear(final_channels, final_channels * 2)
+        self.bn1 = nn.BatchNorm1d(final_channels * 2)
+        self.relu1 = nn.ReLU()
+        self.dropout1 = nn.Dropout(dropout * 0.5)
+        
+        self.fc2 = nn.Linear(final_channels * 2, final_channels)
+        self.bn2 = nn.BatchNorm1d(final_channels)
+        self.relu2 = nn.ReLU()
+        self.dropout2 = nn.Dropout(dropout * 0.5)
+        
+        # Output layer: 78 values (13 durations × 6 return periods)
+        self.fc_out = nn.Linear(final_channels, self.num_durations * self.num_return_periods)
+    
+    def forward(self, x):
+        """
+        Args:
+            x: [batch, 13, seq_len] - multi-channel time-series
+        
+        Returns:
+            [batch, 13, 6] - IDF predictions
+        """
+        # TCAN feature extraction
+        x = self.tcan_network(x)  # [batch, final_channels, reduced_seq]
+        
+        # Global pooling
+        x = self.global_pool(x).squeeze(-1)  # [batch, final_channels]
+        
+        # Fully connected layers
+        x = self.fc1(x)
+        x = self.bn1(x)
+        x = self.relu1(x)
+        x = self.dropout1(x)
+        
+        x = self.fc2(x)
+        x = self.bn2(x)
+        x = self.relu2(x)
+        x = self.dropout2(x)
+        
+        # Output
+        x = self.fc_out(x)  # [batch, 78]
+        
+        # Reshape to [batch, 13, 6]
+        return x.view(-1, self.num_durations, self.num_return_periods)
 
 
 class TCN(nn.Module):
@@ -926,3 +1145,187 @@ def save_optuna_results(study, model_name, output_dir="../results"):
     print(f"All trials saved to: {trials_path}")
     
     return best_params_df, trials_df
+
+
+# ============================================================================
+# Sequential TCN/TCAN Objective Functions
+# ============================================================================
+
+def create_sequential_tcn_objective(train_dataset, val_dataset, device, max_epochs=400):
+    """
+    Create Optuna objective for Sequential TCN hyperparameter tuning.
+    
+    Args:
+        train_dataset: SequentialIDFDataset for training
+        val_dataset: SequentialIDFDataset for validation
+        device: torch device
+        max_epochs: Maximum epochs per trial
+    
+    Returns:
+        Optuna objective function
+    """
+    def objective(trial):
+        set_seed(SEED)
+        
+        # Suggest hyperparameters
+        seq_len = trial.suggest_int("seq_len", 50, 500, step=50)
+        extreme_percentile = trial.suggest_float("extreme_percentile", 70, 90)
+        extreme_ratio = trial.suggest_float("extreme_ratio", 0.7, 0.95)
+        num_filters = trial.suggest_categorical("num_filters", [64, 96, 128, 160, 192, 224, 256])
+        kernel_size = trial.suggest_int("kernel_size", 3, 7)
+        dropout = trial.suggest_float("dropout", 0.1, 0.4)
+        num_levels = trial.suggest_int("num_levels", 3, 6)
+        lr = trial.suggest_float("lr", 5e-5, 5e-3, log=True)
+        batch_size = trial.suggest_categorical("batch_size", [16, 32, 64])
+        weight_decay = trial.suggest_float("weight_decay", 1e-7, 1e-4, log=True)
+        
+        # Recreate datasets with suggested hyperparameters
+        # Note: We'll need to pass these through or create datasets in the training script
+        # For now, use the provided datasets
+        
+        # Create model
+        model = SequentialTCN(
+            num_channels=13,
+            seq_len=train_dataset.seq_len,
+            num_filters=num_filters,
+            kernel_size=kernel_size,
+            dropout=dropout,
+            num_levels=num_levels
+        ).to(device)
+        
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        criterion = nn.MSELoss()
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='max', factor=0.5, patience=15, min_lr=1e-7
+        )
+        
+        # Create data loaders
+        train_loader_gen = torch.Generator()
+        train_loader_gen.manual_seed(SEED)
+        train_loader = DataLoader(
+            train_dataset, batch_size=batch_size, shuffle=True, generator=train_loader_gen
+        )
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+        
+        # Training loop with early stopping (TCN)
+        best_val_nse = -np.inf
+        patience_counter = 0
+        patience = 40  # Reduced for faster trials
+        
+        for epoch in range(max_epochs):
+            train_loss = train_sequential_epoch(model, train_loader, optimizer, criterion, device)
+            val_metrics = evaluate_sequential_model(model, val_loader, device, 
+                                                    scaler_y=train_dataset.scaler_y)
+            val_nse = val_metrics['nse']
+            
+            scheduler.step(val_nse)
+            
+            if val_nse > best_val_nse:
+                best_val_nse = val_nse
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    break
+            
+            # Report to Optuna for pruning
+            trial.report(val_nse, epoch)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+        
+        return best_val_nse
+    
+    return objective
+
+
+def create_sequential_tcan_objective(train_dataset, val_dataset, device, max_epochs=400):
+    """
+    Create Optuna objective for Sequential TCAN hyperparameter tuning.
+    
+    Args:
+        train_dataset: SequentialIDFDataset for training
+        val_dataset: SequentialIDFDataset for validation
+        device: torch device
+        max_epochs: Maximum epochs per trial
+    
+    Returns:
+        Optuna objective function
+    """
+    def objective(trial):
+        set_seed(SEED)
+        
+        # Suggest hyperparameters
+        seq_len = trial.suggest_int("seq_len", 50, 500, step=50)
+        extreme_percentile = trial.suggest_float("extreme_percentile", 70, 90)
+        extreme_ratio = trial.suggest_float("extreme_ratio", 0.7, 0.95)
+        attn_heads = trial.suggest_categorical("attn_heads", [4, 8, 16])
+        
+        # num_filters must be divisible by attn_heads
+        all_filters = [64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384]
+        valid_filters = [f for f in all_filters if f % attn_heads == 0]
+        num_filters = trial.suggest_categorical("num_filters", valid_filters)
+        
+        kernel_size = trial.suggest_int("kernel_size", 3, 7)
+        dropout = trial.suggest_float("dropout", 0.1, 0.4)
+        attn_dropout = trial.suggest_float("attn_dropout", 0.05, 0.2)
+        num_levels = trial.suggest_int("num_levels", 3, 6)
+        lr = trial.suggest_float("lr", 5e-5, 5e-3, log=True)
+        batch_size = trial.suggest_categorical("batch_size", [16, 32, 64])
+        weight_decay = trial.suggest_float("weight_decay", 1e-7, 1e-4, log=True)
+        
+        # Create model
+        model = SequentialTCAN(
+            num_channels=13,
+            seq_len=train_dataset.seq_len,
+            num_filters=num_filters,
+            kernel_size=kernel_size,
+            dropout=dropout,
+            num_levels=num_levels,
+            attn_heads=attn_heads,
+            attn_dropout=attn_dropout
+        ).to(device)
+        
+        optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+        criterion = nn.MSELoss()
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='max', factor=0.5, patience=15, min_lr=1e-7
+        )
+        
+        # Create data loaders
+        train_loader_gen = torch.Generator()
+        train_loader_gen.manual_seed(SEED)
+        train_loader = DataLoader(
+            train_dataset, batch_size=batch_size, shuffle=True, generator=train_loader_gen
+        )
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+        
+        # Training loop with early stopping (TCAN)
+        best_val_nse = -np.inf
+        patience_counter = 0
+        patience = 40  # Reduced for faster trials
+        
+        for epoch in range(max_epochs):
+            train_loss = train_sequential_epoch(model, train_loader, optimizer, criterion, device)
+            val_metrics = evaluate_sequential_model(model, val_loader, device, 
+                                                    scaler_y=train_dataset.scaler_y)
+            val_nse = val_metrics['nse']
+            
+            scheduler.step(val_nse)
+            
+            if val_nse > best_val_nse:
+                best_val_nse = val_nse
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    break
+            
+            # Report to Optuna for pruning
+            trial.report(val_nse, epoch)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
+        
+        return best_val_nse
+    
+    return objective
+

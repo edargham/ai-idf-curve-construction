@@ -221,6 +221,61 @@ def build_idf_from_out_scaled(
     }
 
 
+def build_idf_from_direct_predictions(
+    predictions,
+    scaler_y,
+    standard_durations_minutes,
+    return_periods,
+    csv_basename,
+):
+    """
+    Build IDF curves from direct model predictions (Sequential TCN/TCAN).
+    
+    Args:
+        predictions: np.array of shape [13, 6] - direct intensity predictions
+        scaler_y: StandardScaler to inverse transform predictions
+        standard_durations_minutes: List of 13 duration values
+        return_periods: List of 6 return period values [2, 5, 10, 25, 50, 100]
+        csv_basename: Output CSV filename
+    
+    Returns:
+        dict with idf_df, idf_curves, standard_idf_curves
+    """
+    # Inverse transform predictions: [13, 6] -> scaled intensities -> original intensities
+    predictions_flat = predictions.reshape(-1, 1)  # [78, 1]
+    predictions_unscaled = scaler_y.inverse_transform(predictions_flat)  # [78, 1]
+    predictions_unscaled = predictions_unscaled.reshape(13, 6)  # [13, 6]
+    
+    # No frequency factors - predictions ARE the intensities
+    # predictions are already in mm/hr
+    
+    # Build IDF curves dictionary: {return_period: [13 intensities]}
+    idf_curves = {}
+    standard_idf_curves = {}
+    
+    for rp_idx, rp in enumerate(return_periods):
+        # Extract intensities for this return period across all durations
+        intensities = predictions_unscaled[:, rp_idx]  # [13]
+        idf_curves[rp] = intensities
+        standard_idf_curves[rp] = intensities.tolist()
+    
+    # Build DataFrame for CSV
+    idf_df_data = {"Duration (minutes)": standard_durations_minutes}
+    for rp in return_periods:
+        idf_df_data[f"{rp}-year"] = standard_idf_curves[rp]
+    
+    idf_df = pd.DataFrame(idf_df_data)
+    csv_path = os.path.join(os.path.dirname(__file__), "..", "results", csv_basename)
+    idf_df.to_csv(csv_path, index=False)
+    print(f"IDF curves data saved to: {csv_path}")
+    
+    return {
+        "idf_df": idf_df,
+        "idf_curves": idf_curves,
+        "standard_idf_curves": standard_idf_curves,
+    }
+
+
 def compute_and_save_duration_metrics(
     val_df_combined,
     preds_intensity,
@@ -332,6 +387,102 @@ def compute_and_save_duration_metrics(
     metrics_df.to_csv(metrics_file_path, index=False)
     print(f"Model performance metrics saved to: {metrics_file_path}")
 
+    return duration_metrics, (overall_rmse, overall_mae, overall_r2, overall_nse)
+
+
+def compute_sequential_metrics(
+    predictions,
+    targets,
+    scaler_y,
+    standard_durations_minutes,
+    return_periods,
+    model_tag
+):
+    """
+    Compute metrics for sequential model predictions.
+    
+    Args:
+        predictions: np.array [13, 6] - model predictions (scaled)
+        targets: np.array [13, 6] - ground truth targets (scaled)
+        scaler_y: StandardScaler to inverse transform
+        standard_durations_minutes: List of 13 duration values
+        return_periods: List of 6 return period values
+        model_tag: Model name string (e.g., 'TCN', 'TCAN')
+    
+    Returns:
+        tuple: (duration_metrics_dict, overall_metrics_tuple)
+    """
+    # Inverse transform both predictions and targets
+    preds_flat = predictions.reshape(-1, 1)
+    targets_flat = targets.reshape(-1, 1)
+    
+    preds_unscaled = scaler_y.inverse_transform(preds_flat).reshape(13, 6)
+    targets_unscaled = scaler_y.inverse_transform(targets_flat).reshape(13, 6)
+    
+    # Compute per-duration metrics (averaged across return periods)
+    duration_metrics = {}
+    for dur_idx, dur_name in enumerate([f"{d}mns" if d < 60 else f"{d//60}h" if d < 1440 else "24h" 
+                                         for d in standard_durations_minutes]):
+        dur_preds = preds_unscaled[dur_idx, :]  # [6]
+        dur_targets = targets_unscaled[dur_idx, :]  # [6]
+        
+        try:
+            r2m = r2_score(dur_targets, dur_preds)
+        except Exception:
+            r2m = np.nan
+        
+        numerator = np.sum((dur_targets - dur_preds) ** 2)
+        denominator = np.sum((dur_targets - np.mean(dur_targets)) ** 2)
+        nse_m = 1 - (numerator / denominator) if denominator != 0 else np.nan
+        
+        mae_m = mean_absolute_error(dur_targets, dur_preds)
+        rmse_m = np.sqrt(mean_squared_error(dur_targets, dur_preds))
+        
+        duration_metrics[dur_name] = {
+            "R2": r2m,
+            "NSE": nse_m,
+            "MAE": mae_m,
+            "RMSE": rmse_m,
+        }
+    
+    # Compute overall metrics (all predictions vs all targets)
+    preds_all = preds_unscaled.flatten()
+    targets_all = targets_unscaled.flatten()
+    
+    overall_rmse = np.sqrt(mean_squared_error(targets_all, preds_all))
+    overall_mae = mean_absolute_error(targets_all, preds_all)
+    overall_r2 = r2_score(targets_all, preds_all)
+    
+    numerator = np.sum((targets_all - preds_all) ** 2)
+    denominator = np.sum((targets_all - np.mean(targets_all)) ** 2)
+    overall_nse = 1 - (numerator / denominator) if denominator != 0 else np.nan
+    
+    # Save to metrics file
+    metrics_row = {
+        "Model": model_tag,
+        "RMSE": overall_rmse,
+        "MAE": overall_mae,
+        "R2": overall_r2,
+        "NSE": overall_nse,
+    }
+    
+    metrics_file_path = os.path.join(
+        os.path.dirname(__file__), "..", "results", "model_performance_metrics.csv"
+    )
+    if os.path.exists(metrics_file_path):
+        metrics_df = pd.read_csv(metrics_file_path)
+        if model_tag in metrics_df["Model"].values:
+            for col, val in metrics_row.items():
+                metrics_df.loc[metrics_df["Model"] == model_tag, col] = val
+        else:
+            metrics_df = pd.concat(
+                [metrics_df, pd.DataFrame([metrics_row])], ignore_index=True
+            )
+    else:
+        metrics_df = pd.DataFrame([metrics_row])
+    metrics_df.to_csv(metrics_file_path, index=False)
+    print(f"Model performance metrics saved to: {metrics_file_path}")
+    
     return duration_metrics, (overall_rmse, overall_mae, overall_r2, overall_nse)
 
 

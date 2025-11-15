@@ -6,6 +6,8 @@ from split_utils import build_train_val
 from shared_io import shared_preprocessing
 
 import numpy as np
+import pandas as pd
+import os
 
 
 class TensorRegressionDataset(Dataset):
@@ -18,6 +20,272 @@ class TensorRegressionDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.X[idx], self.y[idx]
+
+
+class SequentialIDFDataset(Dataset):
+    """
+    Sequential dataset for TCN/TCAN models using time-series windows.
+    
+    Loads bey-aggregated-final.csv, performs extreme event sampling,
+    creates fixed-length windows with multi-channel input (13 durations),
+    and generates targets as empirical return period intensities.
+    
+    Args:
+        csv_path: Path to bey-aggregated-final.csv
+        train_years: Range of years for training (e.g., range(1998, 2019))
+        val_years: Range of years for validation (e.g., range(2019, 2026))
+        seq_len: Fixed window length in timesteps
+        extreme_percentile: Percentile threshold for extreme events (70-90)
+        extreme_ratio: Ratio of extreme to normal samples (0.7-0.95)
+        is_train: Whether this is training set (affects which years are used)
+        seed: Random seed for reproducibility
+    """
+    
+    def __init__(self, csv_path, train_years, val_years, seq_len=256, 
+                 extreme_percentile=75, extreme_ratio=0.8, is_train=True, seed=42):
+        self.seq_len = seq_len
+        self.extreme_percentile = extreme_percentile
+        self.extreme_ratio = extreme_ratio
+        self.is_train = is_train
+        self.seed = seed
+        
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        
+        # Duration columns in order
+        self.duration_cols = ['5mns', '10mns', '15mns', '30mns', '1h', '90min', 
+                              '2h', '3h', '6h', '12h', '15h', '18h', '24h']
+        self.n_durations = len(self.duration_cols)
+        
+        # Return periods for IDF curves
+        self.return_periods = np.array([2, 5, 10, 25, 50, 100])
+        self.n_return_periods = len(self.return_periods)
+        
+        # Load and process data
+        print(f"\n{'='*60}")
+        print(f"Loading Sequential IDF Dataset ({'Train' if is_train else 'Validation'})")
+        print(f"{'='*60}")
+        self._load_data(csv_path, train_years, val_years)
+        self._identify_extreme_events()
+        self._create_windows()
+        self._generate_targets()
+        self._create_scalers()
+        
+        print(f"Dataset created: {len(self)} windows")
+        print(f"Sequence shape: [13 channels, {seq_len} timesteps]")
+        print(f"Target shape: [13 durations, 6 return periods]")
+        print(f"{'='*60}\n")
+    
+    def _load_data(self, csv_path, train_years, val_years):
+        """Load time-series data and split by year."""
+        print(f"Loading data from {csv_path}...")
+        
+        # Check if file exists
+        if not os.path.exists(csv_path):
+            raise FileNotFoundError(f"Cannot find {csv_path}")
+        
+        # Load the full time-series in chunks for efficiency
+        print("Reading large CSV file (this may take 30-60 seconds)...")
+        df = pd.read_csv(csv_path, parse_dates=['date'], index_col='date')
+        print(f"✓ Loaded {len(df):,} timesteps from {df.index[0]} to {df.index[-1]}")
+        
+        # Extract year from index
+        df['year'] = df.index.year
+        
+        # Split by year
+        years_to_use = list(train_years) if self.is_train else list(val_years)
+        self.df = df[df['year'].isin(years_to_use)].copy()
+        
+        # Store for target generation later (before filtering columns)
+        self.all_years_df = df[df['year'].isin(list(val_years))].copy() if self.is_train else self.df.copy()
+        
+        # Keep only duration columns
+        self.df = self.df[self.duration_cols]
+        
+        print(f"✓ Using years: {min(years_to_use)}-{max(years_to_use)}")
+        print(f"✓ Filtered to {len(self.df):,} timesteps")
+        
+        # Free memory
+        del df
+    
+    def _identify_extreme_events(self):
+        """Identify extreme event timestamps using percentile threshold."""
+        print(f"Identifying extreme events (percentile={self.extreme_percentile})...", end=' ')
+        
+        extreme_mask = np.zeros(len(self.df), dtype=bool)
+        
+        for dur_col in self.duration_cols:
+            # Only consider non-zero values for percentile calculation
+            non_zero_vals = self.df[dur_col][self.df[dur_col] > 0].values
+            
+            if len(non_zero_vals) == 0:
+                continue
+                
+            threshold = np.percentile(non_zero_vals, self.extreme_percentile)
+            extreme_mask |= (self.df[dur_col].values >= threshold)
+        
+        self.extreme_indices = np.where(extreme_mask)[0]
+        
+        # Identify normal events (non-zero but below threshold)
+        any_nonzero = (self.df[self.duration_cols].sum(axis=1) > 0).values
+        normal_mask = ~extreme_mask & any_nonzero
+        self.normal_indices = np.where(normal_mask)[0]
+        
+        print(f"✓ Found {len(self.extreme_indices):,} extreme + {len(self.normal_indices):,} normal events")
+    
+    def _create_windows(self):
+        """Create fixed-length sliding windows centered on events."""
+        print(f"Creating windows (length={self.seq_len}, ratio={self.extreme_ratio})...", end=' ')
+        
+        # Drastically reduce sample size for faster training
+        # Use only 5% of extreme events (or max 5000)
+        n_extreme_target = min(5000, int(len(self.extreme_indices) * 0.05))
+        n_normal_target = int(n_extreme_target * (1 - self.extreme_ratio) / self.extreme_ratio)
+        
+        # Sample indices
+        n_extreme_actual = min(n_extreme_target, len(self.extreme_indices))
+        n_normal_actual = min(n_normal_target, len(self.normal_indices))
+        
+        sampled_extreme = np.random.choice(self.extreme_indices, n_extreme_actual, replace=False)
+        sampled_normal = np.random.choice(self.normal_indices, n_normal_actual, replace=False) if n_normal_actual > 0 else np.array([])
+        
+        event_indices = np.concatenate([sampled_extreme, sampled_normal])
+        np.random.shuffle(event_indices)
+        
+        # Create windows around these events
+        windows = []
+        valid_event_indices = []
+        
+        for idx in event_indices:
+            # Create window centered on event
+            start_idx = max(0, idx - self.seq_len // 2)
+            end_idx = start_idx + self.seq_len
+            
+            # Adjust if we're at the end of the data
+            if end_idx > len(self.df):
+                end_idx = len(self.df)
+                start_idx = max(0, end_idx - self.seq_len)
+            
+            # Skip if window is too short
+            if end_idx - start_idx < self.seq_len:
+                continue
+            
+            # Extract window for all durations
+            window_data = self.df.iloc[start_idx:end_idx][self.duration_cols].values  # [seq_len, 13]
+            windows.append(window_data.T)  # Transpose to [13, seq_len]
+            valid_event_indices.append(idx)
+        
+        self.windows = np.array(windows, dtype=np.float32)  # [N, 13, seq_len]
+        self.event_indices = np.array(valid_event_indices)
+        
+        print(f"✓ Created {len(self.windows):,} windows")
+    
+    def _generate_targets(self):
+        """Generate empirical return period intensities as targets."""
+        print("Generating targets from empirical return periods...", end=' ')
+        
+        # For each duration, compute annual maxima from validation years
+        targets = []
+        
+        for dur_col in self.duration_cols:
+            # Get validation data for this duration
+            val_data = self.all_years_df[dur_col].values
+            
+            # Compute annual maxima per year
+            years_list = self.all_years_df.index.year.unique()
+            annual_maxima = []
+            
+            for year in sorted(years_list):
+                year_mask = self.all_years_df.index.year == year
+                year_data = self.all_years_df.loc[year_mask, dur_col].values
+                if len(year_data) > 0:
+                    annual_maxima.append(np.max(year_data))
+            
+            annual_maxima = np.array(annual_maxima)
+            
+            # Rank and compute empirical return periods
+            sorted_maxima = np.sort(annual_maxima)[::-1]  # Descending order
+            n = len(sorted_maxima)
+            ranks = np.arange(1, n + 1)
+            empirical_T = (n + 1) / ranks  # Weibull formula
+            
+            # Interpolate to get intensities at standard return periods
+            rp_intensities = []
+            for rp in self.return_periods:
+                if rp <= empirical_T.max() and rp >= empirical_T.min():
+                    # Interpolate in log-log space for better fit
+                    intensity = np.exp(np.interp(np.log(rp), np.log(empirical_T[::-1]), 
+                                                  np.log(sorted_maxima[::-1] + 1e-8)))
+                else:
+                    # Extrapolate linearly in log-log space
+                    intensity = np.exp(np.interp(np.log(rp), np.log(empirical_T[::-1]), 
+                                                  np.log(sorted_maxima[::-1] + 1e-8), 
+                                                  left=np.nan, right=np.nan))
+                    if np.isnan(intensity):
+                        # Use closest available value
+                        if rp < empirical_T.min():
+                            intensity = sorted_maxima[-1]
+                        else:
+                            intensity = sorted_maxima[0]
+                
+                rp_intensities.append(intensity)
+            
+            targets.append(rp_intensities)
+        
+        # targets is now [13 durations, 6 return periods]
+        self.targets = np.array(targets, dtype=np.float32)  # [13, 6]
+        
+        # Replicate for all windows (same targets for all windows in this split)
+        # Each window predicts the same IDF curve structure
+        self.targets_per_window = np.tile(self.targets, (len(self.windows), 1, 1))  # [N, 13, 6]
+        
+        print(f"✓ Generated targets shape: {self.targets_per_window.shape}")
+    
+    def _create_scalers(self):
+        """Create and fit scalers for sequences and targets."""
+        print("Creating scalers...", end=' ')
+        
+        # Flatten windows for scaling: [N, 13, seq_len] -> [N * 13 * seq_len]
+        windows_flat = self.windows.reshape(-1, 1)
+        
+        self.scaler_X = StandardScaler()
+        self.scaler_X.fit(windows_flat)
+        
+        # Scale windows
+        scaled_windows_flat = self.scaler_X.transform(windows_flat)
+        self.windows_scaled = scaled_windows_flat.reshape(self.windows.shape)
+        
+        # Scale targets: [N, 13, 6] -> [N * 13 * 6]
+        targets_flat = self.targets_per_window.reshape(-1, 1)
+        
+        self.scaler_y = StandardScaler()
+        self.scaler_y.fit(targets_flat)
+        
+        scaled_targets_flat = self.scaler_y.transform(targets_flat)
+        self.targets_scaled = scaled_targets_flat.reshape(self.targets_per_window.shape)
+        
+        print("✓ Scaling complete")
+    
+    def __len__(self):
+        return len(self.windows_scaled)
+    
+    def __getitem__(self, idx):
+        """
+        Returns:
+            sequence: [13, seq_len] - Multi-channel time-series window
+            target: [13, 6] - Return period intensities for each duration
+        """
+        return (
+            torch.from_numpy(self.windows_scaled[idx]),  # [13, seq_len]
+            torch.from_numpy(self.targets_scaled[idx])   # [13, 6]
+        )
+    
+    def get_latest_window(self):
+        """Get the most recent window for prediction."""
+        # Return the last window in the dataset
+        if len(self) > 0:
+            return self.windows_scaled[-1:], self.targets_per_window[-1:]  # [1, 13, seq_len], [1, 13, 6]
+        return None, None
 
 
 def create_feats_and_labels(df):
