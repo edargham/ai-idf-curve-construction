@@ -492,47 +492,39 @@ def compute_sequential_metrics(
     Compute metrics for sequential model predictions.
     
     Args:
-        predictions: np.array [13, 6] - model predictions (scaled)
-        targets: np.array [13, 6] - ground truth targets (scaled)
+        predictions: np.array [13, 1] - base log intensity predictions (scaled)
+        targets: np.array [13, 1] - ground truth base log intensities (scaled)
         scaler_y: StandardScaler to inverse transform
         standard_durations_minutes: List of 13 duration values
-        return_periods: List of 6 return period values
+        return_periods: List of 6 return period values (not used in current implementation)
         model_tag: Model name string (e.g., 'TCN', 'TCAN')
     
     Returns:
         tuple: (duration_metrics_dict, overall_metrics_tuple)
     """
     # Inverse transform both predictions and targets
-    preds_flat = predictions.reshape(-1, 1)
-    targets_flat = targets.reshape(-1, 1)
+    preds_flat = predictions.reshape(-1, 1)  # [13, 1]
+    targets_flat = targets.reshape(-1, 1)  # [13, 1]
     
-    preds_unscaled = scaler_y.inverse_transform(preds_flat).reshape(13, 6)
-    targets_unscaled = scaler_y.inverse_transform(targets_flat).reshape(13, 6)
+    preds_unscaled = scaler_y.inverse_transform(preds_flat).flatten()  # [13]
+    targets_unscaled = scaler_y.inverse_transform(targets_flat).flatten()  # [13]
     
-    # Compute per-duration metrics (averaged across return periods)
+    # Compute per-duration metrics (base log intensities only)
     duration_metrics = {}
     for dur_idx, dur_name in enumerate([f"{d}mns" if d < 60 else f"{d//60}h" if d < 1440 else "24h" 
                                          for d in standard_durations_minutes]):
-        dur_preds = preds_unscaled[dur_idx, :]  # [6]
-        dur_targets = targets_unscaled[dur_idx, :]  # [6]
+        dur_pred = preds_unscaled[dur_idx]  # scalar
+        dur_target = targets_unscaled[dur_idx]  # scalar
         
-        try:
-            r2m = r2_score(dur_targets, dur_preds)
-        except Exception:
-            r2m = np.nan
-        
-        numerator = np.sum((dur_targets - dur_preds) ** 2)
-        denominator = np.sum((dur_targets - np.mean(dur_targets)) ** 2)
-        nse_m = 1 - (numerator / denominator) if denominator != 0 else np.nan
-        
-        mae_m = mean_absolute_error(dur_targets, dur_preds)
-        rmse_m = np.sqrt(mean_squared_error(dur_targets, dur_preds))
+        # For single values, compute simple error metrics
+        abs_error = abs(dur_target - dur_pred)
+        squared_error = (dur_target - dur_pred) ** 2
         
         duration_metrics[dur_name] = {
-            "R2": r2m,
-            "NSE": nse_m,
-            "MAE": mae_m,
-            "RMSE": rmse_m,
+            "R2": np.nan,  # Can't compute R2 for single value
+            "NSE": np.nan,  # Can't compute NSE for single value
+            "MAE": abs_error,
+            "RMSE": np.sqrt(squared_error),
         }
     
     # Compute overall metrics (all predictions vs all targets)
