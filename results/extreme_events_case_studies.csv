@@ -1,0 +1,8 @@
+Event,Date,Duration,Observed (mm/hr),Literature (mm/hr),Gumbel (mm/hr),AI Models (Best→Worst),AI Pred (mm/hr),Improvement vs Gumbel,Best Overall
+Event 1,2019,5 mins,81.43,135.60,77.32,"TCAN, ANN, TCN, SVM","91.35, 92.95, 94.63, 59.49",None beat Gumbel,Gumbel
+Event 2,2019,10 mins,40.72,106.68,42.17,"TCAN, TCN, SVM, ANN","51.13, 52.77, 28.53, 24.29",None beat Gumbel,Gumbel
+Event 3,2019,60 mins,10.85,38.64,10.56,"SVM, ANN, TCAN, TCN","10.74, 8.87, 12.99, 13.53",65.0%,SVM
+Event 4,2023,1.5 hrs,9.50,N/A,9.72,"SVM, TCAN, ANN, TCN","8.06, 11.65, 7.23, 11.95",None beat Gumbel,Gumbel
+Event 5,2020,3 hrs,6.31,17.40,7.72,"SVM, ANN, TCAN, TCN","6.36, 7.32, 9.37, 9.51",28.6% to 96.5%,SVM
+Event 6,2020,6 hrs,5.66,10.32,5.40,"TCAN, TCN, ANN, SVM","6.31, 6.38, 4.05, 3.91",None beat Gumbel,Gumbel
+Event 7,2020,12 hrs,3.47,5.88,3.73,"ANN, SVM, TCN, TCAN","2.88, 2.82, 4.12, 4.36",None beat Gumbel,Gumbel

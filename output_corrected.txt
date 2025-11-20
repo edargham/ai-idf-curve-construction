@@ -1,0 +1,332 @@
+================================================================================
+COMPREHENSIVE IDF CURVE MODEL EVALUATION
+================================================================================
+
+⚠️  METHODOLOGY: Unbiased evaluation on full validation dataset (2019-2025)
+   followed by case studies on 7 objectively-selected extreme events
+
+1. Loading datasets...
+   ✓ Annual max data loaded: (28, 14)
+   ✓ Gumbel IDF data loaded: (6, 14)
+   ✓ Literature IDF data loaded: (6, 14)
+   ✓ SVM IDF data loaded: (13, 7)
+   ✓ ANN IDF data loaded: (13, 7)
+   ✓ TCN IDF data loaded: (13, 7)
+   ✓ TCAN IDF data loaded: (13, 7)
+
+================================================================================
+SECTION 1: FULL VALIDATION DATASET EVALUATION (2019-2025)
+================================================================================
+This is the authoritative, unbiased performance evaluation.
+Matches validation period used in model training (2019-2025, 7 years).
+   Evaluating models on FULL validation dataset (2019-2025)...
+   ✓ Validation period: 2019-2025 (7 years)
+   ✓ Collected 91 observations across all durations
+   ✓ Calculated metrics for 6 models
+
+================================================================================
+FULL VALIDATION RESULTS (N=91 observations)
+================================================================================
+ Rank      Model    RMSE     MAE     R2     NSE  N
+    1        SVM  5.7874  2.9726 0.8379  0.8338 91
+    2     Gumbel  6.6835  3.0895 0.8726  0.7783 91
+    3        ANN  9.5866  4.4810 0.8047  0.5439 91
+    4       TCAN 10.5091  5.7867 0.8609  0.4519 91
+    5        TCN 11.2934  6.2461 0.8608  0.3670 91
+    6 Literature 33.2234 24.7963 0.7710 -3.5709 70
+
+--------------------------------------------------------------------------------
+STATISTICAL SIGNIFICANCE TESTS
+--------------------------------------------------------------------------------
+
+95% Confidence Intervals (Bootstrap, 1000 iterations):
+
+SVM:
+   RMSE: [3.6643, 7.8648]
+   MAE:  [2.0836, 4.0563]
+
+Gumbel:
+   RMSE: [3.7116, 9.7882]
+   MAE:  [2.0527, 4.4360]
+
+ANN:
+   RMSE: [5.5946, 13.5051]
+   MAE:  [3.0053, 6.4500]
+
+TCAN:
+   RMSE: [6.9726, 14.1007]
+   MAE:  [4.2354, 7.8078]
+
+TCN:
+   RMSE: [7.6898, 14.9747]
+   MAE:  [4.5721, 8.3738]
+
+--------------------------------------------------------------------------------
+Paired T-Tests: Model Error Comparisons
+--------------------------------------------------------------------------------
+Tests whether prediction errors differ significantly from Gumbel (reference).
+All models are evaluated against OBSERVED DATA as the true baseline.
+
+   Performing paired t-tests comparing prediction errors...
+   Baseline: Observed data | Reference model for comparison: Gumbel
+     Model  Mean_Error  Error_Diff  Pct_Change  p_value                             vs_Baseline
+Literature     24.7963     21.0369    559.5756   0.0000         Significantly worse than Gumbel
+    Gumbel      3.0895         NaN         NaN   1.0000                         Reference Model
+       SVM      2.9726     -0.1169     -3.7847   0.7839 Not significantly different from Gumbel
+       ANN      4.4810      1.3914     45.0374   0.0048         Significantly worse than Gumbel
+       TCN      6.2461      3.1566    102.1709   0.0000         Significantly worse than Gumbel
+      TCAN      5.7867      2.6972     87.3020   0.0000         Significantly worse than Gumbel
+
+================================================================================
+SECTION 2: SELECTING EXTREME EVENTS FOR CASE STUDIES
+================================================================================
+Selection criteria: High return periods (≥3.5yr in 7-year period), high intensities, diverse durations
+NO filtering by model performance - purely objective selection.
+   Selecting 7 extreme events using objective criteria...
+   ✓ Found 26 events with return period ≥3.5 years
+   ✓ Selected 7 extreme events:
+      • Return periods: 7.0 to 7.0 years
+      • Durations: 5-720 minutes
+      • Distribution: short=2 medium=3 long=2 
+
+2.1. Finding dates for selected extreme events...
+   Loading historical intensity data to find event dates...
+   ✓ Processing validation period 2019-2025: 7 years
+   Processing 7 years in parallel using 7 workers...
+   Processing year 2019...
+   Processing year 2020...
+   Processing year 2021...
+   Processing year 2022...
+   Processing year 2023...
+   Processing year 2024...
+   Processing year 2025...
+   ✓ Completed processing all 7 years in 10.81 seconds
+   ✓ Average processing time per year: 1.545 seconds
+   ✓ Estimated sequential time would be ~75.7 seconds (speedup: 7.0x)
+
+2.2. Evaluating all models on selected events...
+   Evaluating all models on 7 selected events...
+   ✓ Complete evaluation matrix created
+
+================================================================================
+SECTION 3: EXTREME EVENT CASE STUDIES (N=7 events)
+================================================================================
+⚠️  NOTE: Event-specific metrics may differ from full dataset metrics.
+   Small sample size (N=7) vs. full validation (N=91)
+
+================================================================================
+EXTREME EVENT COMPARISON TABLE
+================================================================================
+  Event Date Duration Observed (mm/hr) Literature (mm/hr) Gumbel (mm/hr) AI Models (Best→Worst)            AI Pred (mm/hr) Improvement vs Gumbel Best Overall
+Event 1 2019   5 mins            81.43             135.60          77.32    TCAN, ANN, TCN, SVM 91.35, 92.95, 94.63, 59.49      None beat Gumbel       Gumbel
+Event 2 2019  10 mins            40.72             106.68          42.17    TCAN, TCN, SVM, ANN 51.13, 52.77, 28.53, 24.29      None beat Gumbel       Gumbel
+Event 3 2019  60 mins            10.85              38.64          10.56    SVM, ANN, TCAN, TCN  10.74, 8.87, 12.99, 13.53                 65.0%          SVM
+Event 4 2023  1.5 hrs             9.50                N/A           9.72    SVM, TCAN, ANN, TCN   8.06, 11.65, 7.23, 11.95      None beat Gumbel       Gumbel
+Event 5 2020    3 hrs             6.31              17.40           7.72    SVM, ANN, TCAN, TCN     6.36, 7.32, 9.37, 9.51        28.6% to 96.5%          SVM
+Event 6 2020    6 hrs             5.66              10.32           5.40    TCAN, TCN, ANN, SVM     6.31, 6.38, 4.05, 3.91      None beat Gumbel       Gumbel
+Event 7 2020   12 hrs             3.47               5.88           3.73    ANN, SVM, TCN, TCAN     2.88, 2.82, 4.12, 4.36      None beat Gumbel       Gumbel
+
+====================================================================================================
+DETAILED EVENT-BY-EVENT ANALYSIS
+====================================================================================================
+
+🎯 EVENT 1: Duration 5 minutes, Return Period 7.0 years (Year: 2019)
+--------------------------------------------------------------------------------
+   Observed Intensity: 81.43 mm/hr
+   Literature Prediction: 135.60 mm/hr (Error: 54.17)
+   Gumbel Prediction:  77.32 mm/hr (Error: 4.12)
+
+   AI Model Performance:
+   ✗ TCAN : 91.35 mm/hr (Error: 9.91, Improvement: -140.8%)
+   ✗ ANN  : 92.95 mm/hr (Error: 11.52, Improvement: -179.8%)
+   ✗ TCN  : 94.63 mm/hr (Error: 13.20, Improvement: -220.6%)
+   ✗ SVM  : 59.49 mm/hr (Error: 21.94, Improvement: -432.9%)
+
+   🏆 Best Model: TCAN with -140.8% improvement over Gumbel
+
+🎯 EVENT 2: Duration 10 minutes, Return Period 7.0 years (Year: 2019)
+--------------------------------------------------------------------------------
+   Observed Intensity: 40.72 mm/hr
+   Literature Prediction: 106.68 mm/hr (Error: 65.96)
+   Gumbel Prediction:  42.17 mm/hr (Error: 1.45)
+
+   AI Model Performance:
+   ✗ TCAN : 51.13 mm/hr (Error: 10.41, Improvement: -618.4%)
+   ✗ TCN  : 52.77 mm/hr (Error: 12.06, Improvement: -731.7%)
+   ✗ SVM  : 28.53 mm/hr (Error: 12.19, Improvement: -741.0%)
+   ✗ ANN  : 24.29 mm/hr (Error: 16.42, Improvement: -1033.2%)
+
+   🏆 Best Model: TCAN with -618.4% improvement over Gumbel
+
+🎯 EVENT 3: Duration 60 minutes, Return Period 7.0 years (Year: 2019)
+--------------------------------------------------------------------------------
+   Observed Intensity: 10.85 mm/hr
+   Literature Prediction: 38.64 mm/hr (Error: 27.79)
+   Gumbel Prediction:  10.56 mm/hr (Error: 0.29)
+
+   AI Model Performance:
+   ✓ SVM  : 10.74 mm/hr (Error: 0.10, Improvement: 65.0%)
+   ✗ ANN  : 8.87 mm/hr (Error: 1.97, Improvement: -581.1%)
+   ✗ TCAN : 12.99 mm/hr (Error: 2.15, Improvement: -641.4%)
+   ✗ TCN  : 13.53 mm/hr (Error: 2.69, Improvement: -829.1%)
+
+   🏆 Best Model: SVM with 65.0% improvement over Gumbel
+
+🎯 EVENT 4: Duration 90 minutes, Return Period 7.0 years (Year: 2023)
+--------------------------------------------------------------------------------
+   Observed Intensity: 9.50 mm/hr
+   Literature Prediction: N/A
+   Gumbel Prediction:  9.72 mm/hr (Error: 0.22)
+
+   AI Model Performance:
+   ✗ SVM  : 8.06 mm/hr (Error: 1.44, Improvement: -552.2%)
+   ✗ TCAN : 11.65 mm/hr (Error: 2.15, Improvement: -875.0%)
+   ✗ ANN  : 7.23 mm/hr (Error: 2.27, Improvement: -927.3%)
+   ✗ TCN  : 11.95 mm/hr (Error: 2.46, Improvement: -1014.9%)
+
+   🏆 Best Model: SVM with -552.2% improvement over Gumbel
+
+🎯 EVENT 5: Duration 180 minutes, Return Period 7.0 years (Year: 2020)
+--------------------------------------------------------------------------------
+   Observed Intensity: 6.31 mm/hr
+   Literature Prediction: 17.40 mm/hr (Error: 11.09)
+   Gumbel Prediction:  7.72 mm/hr (Error: 1.40)
+
+   AI Model Performance:
+   ✓ SVM  : 6.36 mm/hr (Error: 0.05, Improvement: 96.5%)
+   ✓ ANN  : 7.32 mm/hr (Error: 1.00, Improvement: 28.6%)
+   ✗ TCAN : 9.37 mm/hr (Error: 3.06, Improvement: -117.9%)
+   ✗ TCN  : 9.51 mm/hr (Error: 3.19, Improvement: -127.4%)
+
+   🏆 Best Model: SVM with 96.5% improvement over Gumbel
+
+🎯 EVENT 6: Duration 360 minutes, Return Period 7.0 years (Year: 2020)
+--------------------------------------------------------------------------------
+   Observed Intensity: 5.66 mm/hr
+   Literature Prediction: 10.32 mm/hr (Error: 4.66)
+   Gumbel Prediction:  5.40 mm/hr (Error: 0.26)
+
+   AI Model Performance:
+   ✗ TCAN : 6.31 mm/hr (Error: 0.65, Improvement: -152.5%)
+   ✗ TCN  : 6.38 mm/hr (Error: 0.72, Improvement: -182.8%)
+   ✗ ANN  : 4.05 mm/hr (Error: 1.61, Improvement: -527.9%)
+   ✗ SVM  : 3.91 mm/hr (Error: 1.75, Improvement: -581.9%)
+
+   🏆 Best Model: TCAN with -152.5% improvement over Gumbel
+
+🎯 EVENT 7: Duration 720 minutes, Return Period 7.0 years (Year: 2020)
+--------------------------------------------------------------------------------
+   Observed Intensity: 3.47 mm/hr
+   Literature Prediction: 5.88 mm/hr (Error: 2.41)
+   Gumbel Prediction:  3.73 mm/hr (Error: 0.26)
+
+   AI Model Performance:
+   ✗ ANN  : 2.88 mm/hr (Error: 0.58, Improvement: -125.6%)
+   ✗ SVM  : 2.82 mm/hr (Error: 0.64, Improvement: -147.8%)
+   ✗ TCN  : 4.12 mm/hr (Error: 0.65, Improvement: -151.9%)
+   ✗ TCAN : 4.36 mm/hr (Error: 0.89, Improvement: -244.9%)
+
+   🏆 Best Model: ANN with -125.6% improvement over Gumbel
+
+3.1. Model performance on selected events...
+
+================================================================================
+EVENT-SPECIFIC MODEL PERFORMANCE (N=7 events)
+================================================================================
+⚠️  WARNING: Small sample size - these metrics may not reflect overall performance!
+     Model    RMSE     MAE     R2     NSE  N
+    Gumbel  1.7439  1.1422 0.9979  0.9958  7
+      TCAN  5.6882  4.1745 0.9965  0.9549  7
+       TCN  7.0102  4.9962 0.9966  0.9314  7
+       ANN  7.7035  5.0537 0.9433  0.9172  7
+       SVM  9.5292  5.4445 0.9965  0.8733  7
+Literature 36.9864 27.6806 0.9198 -0.7033  6
+
+================================================================================
+SECTION 4: FULL DATASET vs. EVENT-SPECIFIC METRICS COMPARISON
+================================================================================
+This explains why event-specific rankings may differ from overall rankings.
+
+Model Performance Comparison (Full Dataset vs. 7 Selected Events):
+================================================================================
+
+SVM:
+  Full Dataset (N=91): RMSE=5.7874, R²=0.8379
+  Events (N=7):       RMSE=9.5292, R²=0.9965
+  Difference:            RMSE Δ=+3.7418, R² Δ=+0.1586
+
+Gumbel:
+  Full Dataset (N=91): RMSE=6.6835, R²=0.8726
+  Events (N=7):       RMSE=1.7439, R²=0.9979
+  Difference:            RMSE Δ=-4.9396, R² Δ=+0.1253
+
+ANN:
+  Full Dataset (N=91): RMSE=9.5866, R²=0.8047
+  Events (N=7):       RMSE=7.7035, R²=0.9433
+  Difference:            RMSE Δ=-1.8831, R² Δ=+0.1386
+
+TCAN:
+  Full Dataset (N=91): RMSE=10.5091, R²=0.8609
+  Events (N=7):       RMSE=5.6882, R²=0.9965
+  Difference:            RMSE Δ=-4.8209, R² Δ=+0.1356
+
+TCN:
+  Full Dataset (N=91): RMSE=11.2934, R²=0.8608
+  Events (N=7):       RMSE=7.0102, R²=0.9966
+  Difference:            RMSE Δ=-4.2832, R² Δ=+0.1358
+
+Literature:
+  Full Dataset (N=91): RMSE=33.2234, R²=0.7710
+  Events (N=7):       RMSE=36.9864, R²=0.9198
+  Difference:            RMSE Δ=+3.7630, R² Δ=+0.1488
+
+================================================================================
+💡 KEY INSIGHT:
+================================================================================
+• Full dataset metrics (N=91) are AUTHORITATIVE
+• Event metrics (N=7) show performance on EXTREME cases only
+• Differences indicate model specialization:
+  - Some models excel on extreme events but average overall
+  - Others are consistent across all conditions
+• Use FULL DATASET metrics for general model selection
+• Use EVENT metrics for understanding extreme event capabilities
+
+================================================================================
+SAVING RESULTS
+================================================================================
+   ✓ Full validation metrics saved to: ./results/full_validation_metrics.csv
+   ✓ Event case studies saved to: ./results/extreme_events_case_studies.csv
+   ✓ Per-duration metrics saved to: ./results/full_validation_per_duration_metrics.csv
+
+================================================================================
+EXECUTIVE SUMMARY
+================================================================================
+
+📊 FULL VALIDATION DATASET (PRIMARY RESULTS, N=91):
+   Validation period: 2019-2025 (7 years)
+   🏆 Best Overall Model: SVM
+      RMSE: 5.7874, MAE: 2.9726
+      R²: 0.8379, NSE: 0.8338
+
+   🤖 Best AI Model: SVM
+      RMSE: 5.7874 (vs. Gumbel: 6.6835)
+      Improvement over Gumbel: 13.4%
+
+📈 EXTREME EVENT CASE STUDIES (SUPPLEMENTARY, N=7):
+   Selected events: 7 extreme events
+   Return period range: 7.0-7.0 years
+   Duration range: 5-720 minutes
+
+   Best model frequency on extreme events:
+      • Gumbel: 5/7 events (71.4%)
+      • SVM: 2/7 events (28.6%)
+
+================================================================================
+✅ ANALYSIS COMPLETE
+================================================================================
+
+Recommendations:
+1. Use SVM for general IDF curve construction
+2. Consider SVM for AI-based approaches
+3. Review event case studies for extreme event insights
+4. Full validation metrics are in: ./results/full_validation_metrics.csv

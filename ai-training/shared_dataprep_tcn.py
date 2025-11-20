@@ -48,6 +48,8 @@ class SequentialIDFDataset(Dataset):
         self.extreme_ratio = extreme_ratio
         self.is_train = is_train
         self.seed = seed
+        self.train_years = train_years  # Store for target generation
+        self.val_years = val_years
         
         np.random.seed(seed)
         torch.manual_seed(seed)
@@ -57,7 +59,7 @@ class SequentialIDFDataset(Dataset):
                               '2h', '3h', '6h', '12h', '15h', '18h', '24h']
         self.n_durations = len(self.duration_cols)
         
-        # Return periods for IDF curves
+        # Return periods for IDF curves (not used in targets anymore)
         self.return_periods = np.array([2, 5, 10, 25, 50, 100])
         self.n_return_periods = len(self.return_periods)
         
@@ -73,7 +75,7 @@ class SequentialIDFDataset(Dataset):
         
         print(f"Dataset created: {len(self)} windows")
         print(f"Sequence shape: [13 channels, {seq_len} timesteps]")
-        print(f"Target shape: [13 durations, 6 return periods]")
+        print("Target shape: [13 durations, 1 base log intensity]")
         print(f"{'='*60}\n")
     
     def _load_data(self, csv_path, train_years, val_years):
@@ -96,10 +98,11 @@ class SequentialIDFDataset(Dataset):
         years_to_use = list(train_years) if self.is_train else list(val_years)
         self.df = df[df['year'].isin(years_to_use)].copy()
         
-        # Store for target generation later (before filtering columns)
-        self.all_years_df = df[df['year'].isin(list(val_years))].copy() if self.is_train else self.df.copy()
+        # Store ALL YEARS (train + val) for target generation with year column
+        all_years_combined = list(set(list(train_years) + list(val_years)))
+        self.all_years_df = df[df['year'].isin(all_years_combined)].copy()
         
-        # Keep only duration columns
+        # Keep only duration columns for self.df
         self.df = self.df[self.duration_cols]
         
         print(f"✓ Using years: {min(years_to_use)}-{max(years_to_use)}")
@@ -181,90 +184,42 @@ class SequentialIDFDataset(Dataset):
         print(f"✓ Created {len(self.windows):,} windows")
     
     def _generate_targets(self):
-        """Generate frequency factors as targets (not absolute intensities)."""
-        print("Generating frequency factor targets...", end=' ')
+        """Generate base log intensity targets (one per duration)."""
+        print("Generating base log intensity targets...", end=' ')
         
-        # For each duration, compute mean, std, and frequency factors from annual maxima
-        frequency_factors = []
-        self.duration_stats = []  # Store mean and std for later use
+        # For each duration, compute base log intensity from TRAINING years only (NO DATA LEAKAGE)
+        base_log_intensities = []
         
         for dur_col in self.duration_cols:
-            # Get validation data for this duration
-            val_data = self.all_years_df[dur_col].values
+            # Use ONLY training years for target generation
+            train_data = self.all_years_df[self.all_years_df['year'].isin(list(self.train_years))]
             
-            # Compute annual maxima per year
-            years_list = self.all_years_df.index.year.unique()
+            # Compute annual maxima from training years
+            years_list = train_data.index.year.unique()
             annual_maxima = []
             
             for year in sorted(years_list):
-                year_mask = self.all_years_df.index.year == year
-                year_data = self.all_years_df.loc[year_mask, dur_col].values
+                year_mask = train_data.index.year == year
+                year_data = train_data.loc[year_mask, dur_col].values
                 if len(year_data) > 0:
                     annual_maxima.append(np.max(year_data))
             
             annual_maxima = np.array(annual_maxima)
             
-            # Compute statistics
+            # Base intensity = mean of annual maxima (represents typical ~5-year event)
             mean_intensity = np.mean(annual_maxima)
-            std_intensity = np.std(annual_maxima)
-            self.duration_stats.append({'mean': mean_intensity, 'std': std_intensity})
             
-            # Rank and compute empirical return periods
-            sorted_maxima = np.sort(annual_maxima)[::-1]  # Descending order
-            n = len(sorted_maxima)
-            ranks = np.arange(1, n + 1)
-            empirical_T = (n + 1) / ranks  # Weibull formula
-            
-            # Interpolate to get intensities at standard return periods
-            rp_intensities = []
-            for rp in self.return_periods:
-                if rp <= empirical_T.max() and rp >= empirical_T.min():
-                    intensity = np.exp(np.interp(np.log(rp), np.log(empirical_T[::-1]), 
-                                                  np.log(sorted_maxima[::-1] + 1e-8)))
-                else:
-                    intensity = np.exp(np.interp(np.log(rp), np.log(empirical_T[::-1]), 
-                                                  np.log(sorted_maxima[::-1] + 1e-8), 
-                                                  left=np.nan, right=np.nan))
-                    if np.isnan(intensity):
-                        if rp < empirical_T.min():
-                            intensity = sorted_maxima[-1]
-                        else:
-                            intensity = sorted_maxima[0]
-                
-                rp_intensities.append(intensity)
-            
-            # Convert intensities to frequency factors: K = (I - mean) / std
-            K_values = [(I - mean_intensity) / (std_intensity + 1e-8) for I in rp_intensities]
-            frequency_factors.append(K_values)
+            # Store as LOG intensity (same as SVM/ANN approach)
+            base_log_intensity = np.log(mean_intensity + 1e-8)
+            base_log_intensities.append(base_log_intensity)
         
-        # targets are now frequency factors [13 durations, 6 return periods]
-        self.targets = np.array(frequency_factors, dtype=np.float32)  # [13, 6]
+        # Targets: [13, 1] base log intensities
+        self.targets = np.array(base_log_intensities, dtype=np.float32).reshape(13, 1)
         
-        # Bin windows by intensity quantiles to create variation
-        window_max_intensities = np.max(self.windows, axis=(1, 2))  # [N]
+        # Replicate for all windows (same target for all, or slight variation by intensity bin)
+        self.targets_per_window = np.tile(self.targets, (len(self.windows), 1, 1))  # [N, 13, 1]
         
-        # Create 6 quantile bins
-        quantiles = [0, 1/6, 2/6, 3/6, 4/6, 5/6, 1.0]
-        intensity_thresholds = np.quantile(window_max_intensities, quantiles)
-        window_rp_bins = np.digitize(window_max_intensities, intensity_thresholds[1:-1])  # [N]
-        
-        # Create varied targets by adjusting frequency factors
-        # Higher bins get slightly higher K values (more extreme events)
-        self.targets_per_window = np.zeros((len(self.windows), 13, 6), dtype=np.float32)
-        
-        # Adjustment factors: shift K values based on bin
-        # [0.7, 0.85, 0.95, 1.0, 1.05, 1.15] - multiplicative scaling
-        bin_adjustments = np.array([0.7, 0.85, 0.95, 1.0, 1.05, 1.15])
-        
-        for i in range(len(self.windows)):
-            bin_idx = window_rp_bins[i]
-            adjustment = bin_adjustments[bin_idx]
-            # Scale frequency factors - monotonic ordering preserved
-            self.targets_per_window[i] = self.targets * adjustment
-        
-        bin_counts = np.bincount(window_rp_bins, minlength=6)
-        print(f"✓ Generated frequency factor targets shape: {self.targets_per_window.shape}")
-        print(f"  Window distribution across RPs {self.return_periods}: {bin_counts}")
+        print(f"✓ Generated base log intensity targets shape: {self.targets_per_window.shape}")
     
     def _create_scalers(self):
         """Create and fit scalers for sequences and targets."""
@@ -280,7 +235,7 @@ class SequentialIDFDataset(Dataset):
         scaled_windows_flat = self.scaler_X.transform(windows_flat)
         self.windows_scaled = scaled_windows_flat.reshape(self.windows.shape)
         
-        # Scale targets: [N, 13, 6] -> [N * 13 * 6]
+        # Scale targets: [N, 13, 1] -> [N * 13]
         targets_flat = self.targets_per_window.reshape(-1, 1)
         
         self.scaler_y = StandardScaler()

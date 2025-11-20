@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from scipy import stats
 import time
 import os
 import warnings
@@ -178,13 +179,13 @@ def find_max_event_dates(annual_max_df, historical_file_path='./results/historic
     """
     Find the actual dates when maximum intensities occurred for each year and duration
     Uses parallel processing to improve performance
-    Only processes validation period (1998-2025)
+    Only processes validation period (2019-2025)
     """
     print("   Loading historical intensity data to find event dates...")
 
-    # Filter to validation period (1998-2025)
-    annual_max_df = annual_max_df[(annual_max_df['year'] >= 1998) & (annual_max_df['year'] <= 2025)].copy()
-    print(f"   ✓ Processing validation period 1998-2025: {len(annual_max_df)} years")
+    # Filter to validation period (2019-2025)
+    annual_max_df = annual_max_df[(annual_max_df['year'] >= 2019) & (annual_max_df['year'] <= 2025)].copy()
+    print(f"   ✓ Processing validation period 2019-2025: {len(annual_max_df)} years")
 
     # Create a dictionary to store dates for each year and duration
     max_dates = {}
@@ -327,16 +328,156 @@ def calculate_model_metrics(observed, predicted):
     
     return rmse, mae, r2, nse
 
-def find_ai_superiority_events(annual_max_df, gumbel_df, literature_df, ai_models, max_event_dates=None, n_events=10):
+def calculate_confidence_intervals(observed, predicted, n_bootstrap=1000, confidence=0.95):
     """
-    Find events where at least one AI model outperforms Gumbel significantly
-    Only processes events from 1998-2025 validation period
-    """
-    # Filter annual_max_df to only include validation period (1998-2025)
-    annual_max_df = annual_max_df[(annual_max_df['year'] >= 1998) & (annual_max_df['year'] <= 2025)].copy()
-    print(f"   ✓ Filtered to validation period 1998-2025: {len(annual_max_df)} years of data")
+    Calculate bootstrap confidence intervals for RMSE and MAE.
     
-    # Duration mapping for different datasets
+    Returns:
+        tuple: (rmse_ci_lower, rmse_ci_upper, mae_ci_lower, mae_ci_upper)
+    """
+    # Remove NaN values
+    mask = ~(np.isnan(observed) | np.isnan(predicted))
+    observed_clean = np.array(observed)[mask]
+    predicted_clean = np.array(predicted)[mask]
+    
+    if len(observed_clean) < 10:
+        return np.nan, np.nan, np.nan, np.nan
+    
+    rmse_boots = []
+    mae_boots = []
+    
+    np.random.seed(42)  # For reproducibility
+    n = len(observed_clean)
+    
+    for _ in range(n_bootstrap):
+        # Resample with replacement
+        indices = np.random.choice(n, size=n, replace=True)
+        obs_sample = observed_clean[indices]
+        pred_sample = predicted_clean[indices]
+        
+        # Calculate metrics
+        rmse_boot = np.sqrt(mean_squared_error(obs_sample, pred_sample))
+        mae_boot = mean_absolute_error(obs_sample, pred_sample)
+        
+        rmse_boots.append(rmse_boot)
+        mae_boots.append(mae_boot)
+    
+    # Calculate confidence intervals
+    alpha = (1 - confidence) / 2
+    rmse_ci_lower = np.percentile(rmse_boots, alpha * 100)
+    rmse_ci_upper = np.percentile(rmse_boots, (1 - alpha) * 100)
+    mae_ci_lower = np.percentile(mae_boots, alpha * 100)
+    mae_ci_upper = np.percentile(mae_boots, (1 - alpha) * 100)
+    
+    return rmse_ci_lower, rmse_ci_upper, mae_ci_lower, mae_ci_upper
+
+def perform_paired_t_tests(all_predictions_df, baseline_model='Gumbel'):
+    """
+    Perform paired t-tests comparing model errors against observed data.
+    Tests if differences in prediction errors between models are statistically significant.
+    
+    The baseline is the OBSERVED DATA - all models are evaluated on how well they predict
+    observations. We then compare if one model's errors are significantly different from another.
+    
+    Args:
+        all_predictions_df: DataFrame with 'observed' and model prediction columns
+        baseline_model: Model to compare all others against (default: Gumbel)
+    
+    Returns:
+        DataFrame with t-test results comparing each model to the baseline
+    """
+    print("\n   Performing paired t-tests comparing prediction errors...")
+    print(f"   Baseline: Observed data | Reference model for comparison: {baseline_model}")
+    
+    model_names = ['Literature', 'Gumbel', 'SVM', 'ANN', 'TCN', 'TCAN']
+    observed = all_predictions_df['observed'].values
+    
+    # Calculate absolute errors for baseline model (errors from observed data)
+    if baseline_model not in all_predictions_df.columns:
+        print(f"   Warning: {baseline_model} not found in data")
+        return pd.DataFrame()
+    
+    baseline_pred = all_predictions_df[baseline_model].values
+    baseline_errors = np.abs(observed - baseline_pred)
+    
+    results = []
+    for model_name in model_names:
+        if model_name not in all_predictions_df.columns:
+            continue
+        
+        model_pred = all_predictions_df[model_name].values
+        model_errors = np.abs(observed - model_pred)
+        
+        # Remove NaN pairs
+        mask = ~(np.isnan(baseline_errors) | np.isnan(model_errors))
+        baseline_errors_clean = baseline_errors[mask]
+        model_errors_clean = model_errors[mask]
+        
+        if len(baseline_errors_clean) < 10:
+            continue
+        
+        # Calculate mean errors
+        mean_baseline_error = np.mean(baseline_errors_clean)
+        mean_model_error = np.mean(model_errors_clean)
+        
+        # If comparing to itself, just report the mean error
+        if model_name == baseline_model:
+            results.append({
+                'Model': model_name,
+                'Mean_Error': mean_model_error,
+                't_statistic': 0.0,
+                'p_value': 1.0,
+                'vs_Baseline': 'Reference Model',
+                'N_pairs': len(model_errors_clean)
+            })
+            continue
+        
+        # Perform paired t-test (two-tailed)
+        # H0: model errors = baseline errors
+        # H1: model errors ≠ baseline errors
+        t_stat, p_value = stats.ttest_rel(model_errors_clean, baseline_errors_clean)
+        
+        # Calculate mean difference (negative = model is better)
+        mean_diff = mean_model_error - mean_baseline_error
+        pct_change = (mean_diff / mean_baseline_error) * 100
+        
+        # Interpretation
+        if p_value < 0.05:
+            if mean_diff < 0:
+                significance = f"Significantly better than {baseline_model}"
+            else:
+                significance = f"Significantly worse than {baseline_model}"
+        else:
+            significance = f"Not significantly different from {baseline_model}"
+        
+        results.append({
+            'Model': model_name,
+            'Mean_Error': mean_model_error,
+            't_statistic': t_stat,
+            'p_value': p_value,
+            'Error_Diff': mean_diff,
+            'Pct_Change': pct_change,
+            'vs_Baseline': significance,
+            'N_pairs': len(model_errors_clean)
+        })
+    
+    return pd.DataFrame(results)
+
+def evaluate_full_validation_dataset(annual_max_df, gumbel_df, literature_df, ai_models):
+    """
+    Evaluate ALL models on the complete validation dataset (2019-2025).
+    This provides unbiased performance metrics matching the validation split used in model training.
+    
+    Returns:
+        tuple: (overall_metrics_df, per_duration_metrics_df, all_predictions_df)
+    """
+    print("   Evaluating models on FULL validation dataset (2019-2025)...")
+    
+    # Filter to validation period ONLY (2019-2025) - matching what models were validated on
+    annual_max_df = annual_max_df[(annual_max_df['year'] >= 2019) & (annual_max_df['year'] <= 2025)].copy()
+    print(f"   ✓ Validation period: 2019-2025 ({len(annual_max_df)} years)")
+    
+    # Duration mappings
     duration_mapping_annual = {
         5: '5mns', 10: '10mns', 15: '15mns', 30: '30mns',
         60: '1h', 90: '90min', 120: '2h', 180: '3h', 360: '6h', 720: '12h',
@@ -349,203 +490,327 @@ def find_ai_superiority_events(annual_max_df, gumbel_df, literature_df, ai_model
         720: '720 mins', 900: '900 mins', 1080: '1080 mins', 1440: '1440 mins'
     }
     
-    duration_mapping_literature = {
-        5: '5 mins', 10: '10 mins', 15: '15 mins', 30: '30 mins',
-        60: '60 mins', 90: '90 mins', 120: '120 mins', 180: '180 mins', 360: '360 mins', 
-        720: '720 mins', 900: '900 mins', 1080: '1080 mins', 1440: '1440 mins'
-    }
+    duration_mapping_literature = duration_mapping_gumbel
     
-    superior_events = []
+    # Collect all predictions and observations
+    all_data = []
+    model_names = ['Literature', 'Gumbel', 'SVM', 'ANN', 'TCN', 'TCAN']
     
-    # Analyze each duration
-    for duration_mins in [5, 10, 15, 30, 60, 90, 120, 180, 360, 720, 900, 1080, 1440]:
+    # Process each duration
+    for duration_mins, annual_col in duration_mapping_annual.items():
+        if annual_col not in annual_max_df.columns:
+            continue
+            
         # Get annual max data for this duration
-        annual_col = duration_mapping_annual.get(duration_mins)
-        if annual_col is None or annual_col not in annual_max_df.columns:
+        annual_data = annual_max_df[[annual_col, 'year']].dropna()
+        if len(annual_data) < 5:
             continue
-            
+        
         # Calculate return periods using Weibull formula
-        annual_data = annual_max_df[annual_col].dropna()
-        if len(annual_data) < 5:  # Need sufficient data
-            continue
-            
-        # Create a mapping of intensity values to years for date lookup
-        intensity_to_year = {}
-        for idx, row in annual_max_df.iterrows():
-            if not pd.isna(row[annual_col]):
-                intensity_to_year[row[annual_col]] = row['year']
+        weibull_results = calculate_return_periods_weibull(annual_data[annual_col])
         
-        weibull_results = calculate_return_periods_weibull(annual_data)
+        # Match intensities with years
+        intensity_to_year = dict(zip(annual_data[annual_col].values, annual_data['year'].values))
         
-        # Focus on events with return periods between 1.5-100 years (broader range)
-        target_events = weibull_results[
-            (weibull_results['return_period'] >= 1.5) & 
-            (weibull_results['return_period'] <= 100)
-        ].copy()
-        
-        if len(target_events) == 0:
-            continue
-        
-        # Sample some events across different return periods
-        if len(target_events) > 6:
-            # Take events at different return period ranges (broader sampling)
-            rp_ranges = [
-                (1.5, 3), (3, 7), (7, 15), (15, 30), (30, 100)
-            ]
-            sampled_events = []
-            for rp_min, rp_max in rp_ranges:
-                range_events = target_events[
-                    (target_events['return_period'] >= rp_min) & 
-                    (target_events['return_period'] < rp_max)
-                ]
-                if len(range_events) > 0:
-                    # Take the event closest to the middle of the range
-                    mid_rp = (rp_min + rp_max) / 2
-                    closest_idx = (range_events['return_period'] - mid_rp).abs().idxmin()
-                    sampled_events.append(range_events.loc[closest_idx])
-            
-            if sampled_events:
-                target_events = pd.DataFrame(sampled_events)
-        
-        # For each event, compare model predictions
-        for idx, event in target_events.iterrows():
+        # For each observation, get all model predictions
+        for idx, event in weibull_results.iterrows():
             observed_intensity = event['intensity']
             return_period = event['return_period']
-            
-            # Find the year and date for this event
-            event_year = intensity_to_year.get(observed_intensity)
-            event_date = None
-            if event_year is not None and max_event_dates is not None and event_year in max_event_dates:
-                event_date = max_event_dates[event_year].get(annual_col)
+            year = intensity_to_year.get(observed_intensity)
             
             # Get Gumbel prediction
             gumbel_col = duration_mapping_gumbel.get(duration_mins)
-            if gumbel_col is None or gumbel_col not in gumbel_df.columns:
-                continue
-                
-            gumbel_pred = interpolate_idf_for_return_period(
-                gumbel_df, return_period, gumbel_col
-            )
+            gumbel_pred = np.nan
+            if gumbel_col and gumbel_col in gumbel_df.columns:
+                try:
+                    gumbel_pred = interpolate_idf_for_return_period(gumbel_df, return_period, gumbel_col)
+                except Exception:
+                    pass
             
             # Get Literature prediction
             literature_col = duration_mapping_literature.get(duration_mins)
-            literature_pred = None
-            if literature_col is not None and literature_col in literature_df.columns:
-                literature_pred = interpolate_idf_for_return_period(
-                    literature_df, return_period, literature_col
-                )
+            literature_pred = np.nan
+            if literature_col and literature_col in literature_df.columns:
+                try:
+                    literature_pred = interpolate_idf_for_return_period(literature_df, return_period, literature_col)
+                except Exception:
+                    pass
             
             # Get AI model predictions
             ai_predictions = {}
             for model_name, model_df in ai_models.items():
                 try:
-                    ai_pred = interpolate_ai_idf_for_return_period(
-                        model_df, return_period, duration_mins
-                    )
+                    ai_pred = interpolate_ai_idf_for_return_period(model_df, return_period, duration_mins)
                     ai_predictions[model_name] = ai_pred
                 except Exception:
-                    continue
+                    ai_predictions[model_name] = np.nan
             
-            # Calculate errors for all models
-            gumbel_error = abs(observed_intensity - gumbel_pred)
-            literature_error = abs(observed_intensity - literature_pred) if literature_pred is not None else None
-            ai_errors = {name: abs(observed_intensity - pred) 
-                        for name, pred in ai_predictions.items()}
+            # Store all data
+            data_point = {
+                'year': year,
+                'duration_mins': duration_mins,
+                'return_period': return_period,
+                'observed': observed_intensity,
+                'Literature': literature_pred,
+                'Gumbel': gumbel_pred,
+                **ai_predictions
+            }
+            all_data.append(data_point)
+    
+    all_predictions_df = pd.DataFrame(all_data)
+    print(f"   ✓ Collected {len(all_predictions_df)} observations across all durations")
+    
+    # Calculate overall metrics for each model
+    overall_metrics = []
+    for model_name in model_names:
+        if model_name in all_predictions_df.columns:
+            observed = all_predictions_df['observed'].values
+            predicted = all_predictions_df[model_name].values
             
-            # Check if at least one AI model outperforms Gumbel by a small margin (>5%)
-            if len(ai_errors) > 0:
-                best_ai_error = min(ai_errors.values())
-                if best_ai_error < gumbel_error * 0.95:  # At least 5% improvement
-                    improvement = (gumbel_error - best_ai_error) / gumbel_error * 100
-                    best_model = min(ai_errors.keys(), key=lambda k: ai_errors[k])
-                    
-                    superior_events.append({
-                        'duration_mins': duration_mins,
-                        'observed_intensity': observed_intensity,
-                        'return_period': return_period,
-                        'event_year': event_year,
-                        'event_date': event_date,
-                        'gumbel_pred': gumbel_pred,
-                        'gumbel_error': gumbel_error,
-                        'literature_pred': literature_pred,
-                        'literature_error': literature_error,
-                        'best_ai_model': best_model,
-                        'best_ai_pred': ai_predictions[best_model],
-                        'best_ai_error': best_ai_error,
-                        'improvement_pct': improvement,
-                        **{f'{name}_pred': pred for name, pred in ai_predictions.items()},
-                        **{f'{name}_error': error for name, error in ai_errors.items()}
-                    })
+            rmse, mae, r2, nse = calculate_model_metrics(observed, predicted)
+            n_valid = np.sum(~np.isnan(predicted))
+            
+            overall_metrics.append({
+                'Model': model_name,
+                'RMSE': rmse,
+                'MAE': mae,
+                'R2': r2,
+                'NSE': nse,
+                'N': n_valid
+            })
     
-    # Sort by improvement percentage and return top events
-    superior_events_df = pd.DataFrame(superior_events)
-    if len(superior_events_df) == 0:
-        print("No events found where AI models significantly outperform Gumbel")
-        return pd.DataFrame()
+    overall_metrics_df = pd.DataFrame(overall_metrics)
     
-    superior_events_df = superior_events_df.sort_values('improvement_pct', ascending=False)
-    
-    # Ensure we pick events from unique dates to provide diverse analysis
-    unique_events = []
-    used_dates = set()
-    
-    for idx, event in superior_events_df.iterrows():
-        event_date = None
+    # Calculate per-duration metrics
+    per_duration_metrics = []
+    for duration_mins in duration_mapping_annual.keys():
+        duration_data = all_predictions_df[all_predictions_df['duration_mins'] == duration_mins]
+        if len(duration_data) == 0:
+            continue
         
-        # Extract date information
-        if event.get('event_date') is not None and pd.notna(event['event_date']):
-            try:
-                if isinstance(event['event_date'], str):
-                    # Parse string date and extract date part
-                    event_date = pd.to_datetime(event['event_date']).date()
-                else:
-                    # Extract date part from datetime
-                    event_date = event['event_date'].date()
-            except Exception:
-                # Fallback to using year if date parsing fails
-                event_date = event.get('event_year')
+        for model_name in model_names:
+            if model_name in duration_data.columns:
+                observed = duration_data['observed'].values
+                predicted = duration_data[model_name].values
+                
+                rmse, mae, r2, nse = calculate_model_metrics(observed, predicted)
+                n_valid = np.sum(~np.isnan(predicted))
+                
+                per_duration_metrics.append({
+                    'Duration_mins': duration_mins,
+                    'Model': model_name,
+                    'RMSE': rmse,
+                    'MAE': mae,
+                    'R2': r2,
+                    'NSE': nse,
+                    'N': n_valid
+                })
+    
+    per_duration_metrics_df = pd.DataFrame(per_duration_metrics)
+    
+    print(f"   ✓ Calculated metrics for {len(model_names)} models")
+    return overall_metrics_df, per_duration_metrics_df, all_predictions_df
+
+def select_extreme_events(annual_max_df, all_predictions_df, n_events=7):
+    """
+    Select extreme events based ONLY on objective criteria:
+    - High return periods (≥10 years preferred)
+    - High intensity values (top percentiles)
+    - Diverse durations (stratified selection)
+    
+    NO filtering by model performance - purely objective selection.
+    Uses VALIDATION PERIOD ONLY (2019-2025) for consistency.
+    
+    Returns:
+        DataFrame with selected extreme events
+    """
+    print(f"   Selecting {n_events} extreme events using objective criteria...")
+    
+    # Filter to events with return period ≥ 5 years (most extreme in 7-year validation period)
+    # Note: In a 7-year dataset, max return period is ~7-8 years
+    extreme_candidates = all_predictions_df[all_predictions_df['return_period'] >= 3.5].copy()
+    print(f"   ✓ Found {len(extreme_candidates)} events with return period ≥3.5 years")
+    
+    if len(extreme_candidates) == 0:
+        print("   ⚠️  No events with RP≥3.5yr, using RP≥2yr threshold...")
+        extreme_candidates = all_predictions_df[all_predictions_df['return_period'] >= 2].copy()
+    
+    # Calculate intensity percentile within each duration category
+    extreme_candidates['intensity_percentile'] = 0.0
+    for duration in extreme_candidates['duration_mins'].unique():
+        duration_mask = extreme_candidates['duration_mins'] == duration
+        duration_data = extreme_candidates[duration_mask]
+        percentiles = duration_data['observed'].rank(pct=True)
+        extreme_candidates.loc[duration_mask, 'intensity_percentile'] = percentiles
+    
+    # Calculate composite extremeness score (60% return period, 40% intensity percentile)
+    # Normalize return period to 0-1 scale
+    rp_normalized = (extreme_candidates['return_period'] - extreme_candidates['return_period'].min()) / \
+                    (extreme_candidates['return_period'].max() - extreme_candidates['return_period'].min())
+    
+    extreme_candidates['extremeness_score'] = 0.6 * rp_normalized + 0.4 * extreme_candidates['intensity_percentile']
+    
+    # Define duration strata: short (5-30min), medium (60-180min), long (360-1440min)
+    def categorize_duration(duration_mins):
+        if duration_mins <= 30:
+            return 'short'
+        elif duration_mins <= 180:
+            return 'medium'
         else:
-            # Use year as fallback identifier
-            event_date = event.get('event_year')
-        
-        # Check if we've already used this date
-        if event_date not in used_dates:
-            unique_events.append(event)
-            used_dates.add(event_date)
-            
-            # Stop when we have enough unique events
-            if len(unique_events) >= n_events:
-                break
+            return 'long'
     
-    # Convert back to DataFrame
-    if len(unique_events) > 0:
-        result_df = pd.DataFrame(unique_events)
-        print(f"   ✓ Selected {len(result_df)} events from {len(used_dates)} unique dates")
-        return result_df
+    extreme_candidates['duration_category'] = extreme_candidates['duration_mins'].apply(categorize_duration)
+    
+    # Stratified selection: aim for diverse durations
+    # Target: 2 short, 3 medium, 2 long (adjust if not enough in each category)
+    target_distribution = {'short': 2, 'medium': 3, 'long': 2}
+    
+    selected_events = []
+    for category, target_count in target_distribution.items():
+        category_events = extreme_candidates[extreme_candidates['duration_category'] == category]
+        if len(category_events) > 0:
+            # Sort by extremeness score and take top events
+            category_events_sorted = category_events.sort_values('extremeness_score', ascending=False)
+            n_to_select = min(target_count, len(category_events_sorted))
+            selected_events.append(category_events_sorted.head(n_to_select))
+    
+    if len(selected_events) > 0:
+        selected_df = pd.concat(selected_events, ignore_index=True)
+        
+        # If we don't have enough events, add more from the highest scoring remaining
+        if len(selected_df) < n_events:
+            remaining = extreme_candidates[~extreme_candidates.index.isin(selected_df.index)]
+            remaining_sorted = remaining.sort_values('extremeness_score', ascending=False)
+            additional_needed = n_events - len(selected_df)
+            selected_df = pd.concat([selected_df, remaining_sorted.head(additional_needed)], ignore_index=True)
+        
+        # If we have too many, trim to top n_events by extremeness score
+        if len(selected_df) > n_events:
+            selected_df = selected_df.sort_values('extremeness_score', ascending=False).head(n_events)
+        
+        # Sort by return period for presentation
+        selected_df = selected_df.sort_values('return_period', ascending=False).reset_index(drop=True)
+        
+        print(f"   ✓ Selected {len(selected_df)} extreme events:")
+        print(f"      • Return periods: {selected_df['return_period'].min():.1f} to {selected_df['return_period'].max():.1f} years")
+        print(f"      • Durations: {selected_df['duration_mins'].min()}-{selected_df['duration_mins'].max()} minutes")
+        print("      • Distribution: ", end="")
+        for cat in ['short', 'medium', 'long']:
+            count = (selected_df['duration_category'] == cat).sum()
+            print(f"{cat}={count} ", end="")
+        print()
+        
+        return selected_df
     else:
-        print("   ✗ No unique date events found")
+        print("   ✗ No extreme events found")
         return pd.DataFrame()
 
-def comprehensive_model_evaluation(events_df, ai_models):
+def evaluate_models_on_events(events_df, max_event_dates=None):
     """
-    Comprehensive evaluation of all models on the selected events
+    Evaluate ALL models on the selected events.
+    Shows complete performance matrix including cases where traditional methods win.
+    
+    Returns:
+        DataFrame with detailed event-by-event model comparison
     """
     if len(events_df) == 0:
         return pd.DataFrame()
     
-    model_names = ['Literature', 'Gumbel'] + list(ai_models.keys())
+    print(f"   Evaluating all models on {len(events_df)} selected events...")
+    
+    model_names = ['Literature', 'Gumbel', 'SVM', 'ANN', 'TCN', 'TCAN']
+    
+    # Enhance events_df with additional analysis
+    events_analysis = []
+    
+    for idx, event in events_df.iterrows():
+        # Get event metadata
+        event_data = {
+            'event_num': idx + 1,
+            'year': event['year'],
+            'duration_mins': event['duration_mins'],
+            'return_period': event['return_period'],
+            'observed': event['observed'],
+            'event_date': None
+        }
+        
+        # Try to find event date
+        if max_event_dates is not None and event['year'] in max_event_dates:
+            duration_mapping = {
+                5: '5mns', 10: '10mns', 15: '15mns', 30: '30mns',
+                60: '1h', 90: '90min', 120: '2h', 180: '3h', 360: '6h', 720: '12h',
+                900: '15h', 1080: '18h', 1440: '24h'
+            }
+            duration_col = duration_mapping.get(event['duration_mins'])
+            if duration_col:
+                event_data['event_date'] = max_event_dates[event['year']].get(duration_col)
+        
+        # Get all model predictions and calculate errors
+        for model_name in model_names:
+            if model_name in event:
+                pred = event[model_name]
+                error = abs(event['observed'] - pred) if not np.isnan(pred) else np.nan
+                event_data[f'{model_name}_pred'] = pred
+                event_data[f'{model_name}_error'] = error
+        
+        # Calculate improvements relative to Gumbel
+        if 'Gumbel_error' in event_data and not np.isnan(event_data['Gumbel_error']):
+            gumbel_error = event_data['Gumbel_error']
+            for model_name in ['Literature', 'SVM', 'ANN', 'TCN', 'TCAN']:
+                error_key = f'{model_name}_error'
+                if error_key in event_data and not np.isnan(event_data[error_key]):
+                    improvement = (gumbel_error - event_data[error_key]) / gumbel_error * 100
+                    event_data[f'{model_name}_improvement'] = improvement
+        
+        # Identify best model for this event
+        errors = {}
+        for model_name in model_names:
+            error_key = f'{model_name}_error'
+            if error_key in event_data and not np.isnan(event_data[error_key]):
+                errors[model_name] = event_data[error_key]
+        
+        if errors:
+            best_model = min(errors.keys(), key=lambda k: errors[k])
+            event_data['best_model'] = best_model
+            event_data['best_error'] = errors[best_model]
+        
+        events_analysis.append(event_data)
+    
+    events_analysis_df = pd.DataFrame(events_analysis)
+    print("   ✓ Complete evaluation matrix created")
+    
+    return events_analysis_df
+
+
+
+def comprehensive_model_evaluation(events_df, dataset_type='selected_events'):
+    """
+    Comprehensive evaluation of all models on the provided dataset.
+    
+    Args:
+        events_df: DataFrame with observed and predicted values for all models
+        dataset_type: 'full_validation' or 'selected_events' for labeling
+    
+    Returns:
+        DataFrame with performance metrics for each model
+    """
+    if len(events_df) == 0:
+        return pd.DataFrame()
+    
+    model_names = ['Literature', 'Gumbel', 'SVM', 'ANN', 'TCN', 'TCAN']
     
     # Collect all predictions and observations
     all_predictions = {model: [] for model in model_names}
     all_observations = []
     
+    # Determine column names based on dataset type
+    observed_col = 'observed' if 'observed' in events_df.columns else 'observed_intensity'
+    
     for idx, event in events_df.iterrows():
-        all_observations.append(event['observed_intensity'])
-        all_predictions['Literature'].append(event['literature_pred'] if 'literature_pred' in event and event['literature_pred'] is not None else np.nan)
-        all_predictions['Gumbel'].append(event['gumbel_pred'])
+        all_observations.append(event[observed_col])
         
-        for model_name in ai_models.keys():
-            pred_col = f'{model_name}_pred'
+        for model_name in model_names:
+            pred_col = f'{model_name}_pred' if f'{model_name}_pred' in events_df.columns else model_name
             if pred_col in event:
                 all_predictions[model_name].append(event[pred_col])
             else:
@@ -563,14 +828,16 @@ def comprehensive_model_evaluation(events_df, ai_models):
             'MAE': mae,
             'R2': r2,
             'NSE': nse,
-            'N_Events': len([p for p in preds if not np.isnan(p)])
+            'N': len([p for p in preds if not np.isnan(p)]),
+            'Dataset': dataset_type
         })
     
     return pd.DataFrame(results)
 
-def create_superiority_table(events_df):
+def create_event_comparison_table(events_df):
     """
-    Create a detailed table showing AI superiority events with all outperforming models
+    Create a detailed table comparing all models on selected extreme events.
+    Shows complete performance matrix including cases where traditional methods excel.
     """
     if len(events_df) == 0:
         return pd.DataFrame()
@@ -598,8 +865,8 @@ def create_superiority_table(events_df):
                         date_str = event['event_date'].strftime('%Y-%m-%d %H:%M:%S')
             except Exception:
                 date_str = "N/A"
-        elif event.get('event_year') is not None:
-            date_str = f"{int(event['event_year'])}"
+        elif event.get('year') is not None:
+            date_str = f"{int(event['year'])}"
         
         # Format duration - convert to hours if over 60 minutes
         duration_mins = event['duration_mins']
@@ -612,87 +879,77 @@ def create_superiority_table(events_df):
         else:
             duration_display = f"{duration_mins} mins"
         
-        # Literature and Statistical predictions
-        literature_pred = event['literature_pred'] if event.get('literature_pred') is not None else None
-        statistical_pred = event['gumbel_pred']
-        gumbel_error = event['gumbel_error']
+        # Get observed value
+        observed = event.get('observed', event.get('observed_intensity'))
         
-        # Find all AI models that outperform Gumbel and rank them
+        # Literature and Statistical predictions
+        literature_pred = event.get('Literature_pred')
+        statistical_pred = event.get('Gumbel_pred')
+        gumbel_error = event.get('Gumbel_error', np.nan)
+        
+        # Find all AI models and rank them by performance
         ai_models_performance = []
-        # Also collect all AI model predictions/errors for best/least summary
-        ai_models_all = []
         for model in ['SVM', 'ANN', 'TCN', 'TCAN']:
             error_col = f'{model}_error'
-            if error_col in event:
+            pred_col = f'{model}_pred'
+            if error_col in event and pred_col in event:
                 ai_error = event[error_col]
-                if ai_error < gumbel_error:  # AI model outperforms Gumbel
+                ai_pred = event[pred_col]
+                
+                if not np.isnan(ai_error) and not np.isnan(gumbel_error) and gumbel_error > 0:
                     improvement_pct = (gumbel_error - ai_error) / gumbel_error * 100
-                    ai_models_performance.append({
-                        'model': model,
-                        'error': ai_error,
-                        'improvement_pct': improvement_pct
-                    })
-                # Keep track regardless of beating Gumbel for least/best summary among available AI
-                pred_col = f'{model}_pred'
-                if pred_col in event:
-                    ai_models_all.append({
-                        'model': model,
-                        'error': ai_error,
-                        'pred': event[pred_col]
-                    })
-            else:
-                # If error not present but prediction exists, include with NaN error (won't be chosen as best)
-                pred_col = f'{model}_pred'
-                if pred_col in event:
-                    ai_models_all.append({
-                        'model': model,
-                        'error': np.nan,
-                        'pred': event[pred_col]
-                    })
+                    beats_gumbel = ai_error < gumbel_error
+                else:
+                    improvement_pct = 0
+                    beats_gumbel = False
+                
+                ai_models_performance.append({
+                    'model': model,
+                    'pred': ai_pred,
+                    'error': ai_error,
+                    'improvement_pct': improvement_pct,
+                    'beats_gumbel': beats_gumbel
+                })
         
         # Sort by error (best performance first)
-        ai_models_performance.sort(key=lambda x: x['error'])
+        ai_models_performance.sort(key=lambda x: x['error'] if not np.isnan(x['error']) else float('inf'))
         
-        # Create ranked list of outperforming models
+        # Create model rankings
         if ai_models_performance:
-            outperforming_models = [model['model'] for model in ai_models_performance]
-            improvements = [model['improvement_pct'] for model in ai_models_performance]
+            models_list = ", ".join([m['model'] for m in ai_models_performance])
             
-            # Format as "Model1, Model2, Model3" (in order of performance)
-            models_list = ", ".join(outperforming_models)
+            # Get improvements for models that beat Gumbel
+            improvements = [m['improvement_pct'] for m in ai_models_performance if m['beats_gumbel']]
             
-            # Show improvement range (min%, max%)
-            if len(improvements) > 1:
-                improvement_range = f"{min(improvements):.1f}%, {max(improvements):.1f}%"
+            if improvements:
+                if len(improvements) > 1:
+                    improvement_range = f"{min(improvements):.1f}% to {max(improvements):.1f}%"
+                else:
+                    improvement_range = f"{improvements[0]:.1f}%"
             else:
-                improvement_range = f"{improvements[0]:.1f}%"
+                improvement_range = "None beat Gumbel"
+            
+            # AI predictions in order
+            ai_pred_summary = ", ".join([f"{m['pred']:.2f}" for m in ai_models_performance if not np.isnan(m['pred'])])
         else:
-            models_list = "None"
-            improvement_range = "0%"
+            models_list = "N/A"
+            improvement_range = "N/A"
+            ai_pred_summary = "N/A"
         
-        # Compose AI Pred (mm/hr): numeric predictions only, ordered to match 'AI Models (Best→Worst)'
-        # This lets readers map values to models by position without repeating model names.
-        ai_pred_summary = "N/A"
-        if ai_models_performance:
-            preds_in_order = []
-            for perf in ai_models_performance:  # already sorted best→worst by error
-                model = perf['model']
-                pred_col = f'{model}_pred'
-                if pred_col in event:
-                    preds_in_order.append(f"{event[pred_col]:.2f}")
-            if preds_in_order:
-                ai_pred_summary = ", ".join(preds_in_order)
+        # Get observed value safely
+        observed = event.get('observed', event.get('observed_intensity'))
         
         table_data.append({
             'Event': event_name,
             'Date': date_str,
             'Duration': duration_display,
-            'Observed (mm/hr)': f"{event['observed_intensity']:.2f}",
-            'Literature (mm/hr)': f"{literature_pred:.2f}" if literature_pred is not None else "N/A",
-            'Statistical Pred (mm/hr)': f"{statistical_pred:.2f}",
+            'Observed (mm/hr)': f"{observed:.2f}" if observed is not None else "N/A",
+            'Literature (mm/hr)': f"{literature_pred:.2f}" if literature_pred is not None and not np.isnan(literature_pred) else "N/A",
+            'Gumbel (mm/hr)': f"{statistical_pred:.2f}" if statistical_pred is not None and not np.isnan(statistical_pred) else "N/A",
             'AI Models (Best→Worst)': models_list,
             'AI Pred (mm/hr)': ai_pred_summary,
-            'Improvement Range': improvement_range
+            'Improvement vs Gumbel': improvement_range,
+            'Best Overall': event.get('best_model', 'N/A')
         })
     
     return pd.DataFrame(table_data)
@@ -719,23 +976,25 @@ def detailed_model_analysis_per_event(events_df):
                     date_str = event['event_date'].strftime('%Y-%m-%d')
                 date_info = f" (Date: {date_str})"
             except Exception:
-                if event.get('event_year') is not None:
-                    date_info = f" (Year: {int(event['event_year'])})"
-        elif event.get('event_year') is not None:
-            date_info = f" (Year: {int(event['event_year'])})"
+                if event.get('year') is not None:
+                    date_info = f" (Year: {int(event['year'])})"
+        elif event.get('year') is not None:
+            date_info = f" (Year: {int(event['year'])})"
         
         print(f"\n🎯 EVENT {row_num+1}: Duration {event['duration_mins']} minutes, "
               f"Return Period {event['return_period']:.1f} years{date_info}")
         print("-" * 80)
-        print(f"   Observed Intensity: {event['observed_intensity']:.2f} mm/hr")
+        print(f"   Observed Intensity: {event['observed']:.2f} mm/hr")
         
         # Show Literature prediction if available
-        if event.get('literature_pred') is not None:
-            print(f"   Literature Prediction: {event['literature_pred']:.2f} mm/hr (Error: {event['literature_error']:.2f})")
+        if event.get('Literature_pred') is not None and not pd.isna(event['Literature_pred']):
+            lit_error = abs(event['observed'] - event['Literature_pred'])
+            print(f"   Literature Prediction: {event['Literature_pred']:.2f} mm/hr (Error: {lit_error:.2f})")
         else:
             print("   Literature Prediction: N/A")
         
-        print(f"   Gumbel Prediction:  {event['gumbel_pred']:.2f} mm/hr (Error: {event['gumbel_error']:.2f})")
+        gumbel_error = abs(event['observed'] - event['Gumbel_pred'])
+        print(f"   Gumbel Prediction:  {event['Gumbel_pred']:.2f} mm/hr (Error: {gumbel_error:.2f})")
         
         # Show all AI model predictions
         ai_models = ['SVM', 'ANN', 'TCN', 'TCAN']
@@ -743,30 +1002,32 @@ def detailed_model_analysis_per_event(events_df):
         
         for model in ai_models:
             pred_col = f'{model}_pred'
-            error_col = f'{model}_error'
-            if pred_col in event:
+            if pred_col in event and not pd.isna(event[pred_col]):
                 pred = event[pred_col]
-                error = event[error_col]
-                improvement = (event['gumbel_error'] - error) / event['gumbel_error'] * 100
+                error = abs(event['observed'] - pred)
+                improvement = (gumbel_error - error) / gumbel_error * 100
                 ai_results.append({
                     'Model': model,
                     'Prediction': pred,
                     'Error': error,
                     'Improvement': improvement,
-                    'Better_than_Gumbel': '✓' if error < event['gumbel_error'] else '✗'
+                    'Better_than_Gumbel': '✓' if error < gumbel_error else '✗'
                 })
         
-        ai_results_df = pd.DataFrame(ai_results)
-        ai_results_df = ai_results_df.sort_values('Error')
-        
-        print("\n   AI Model Performance:")
-        for _, row in ai_results_df.iterrows():
-            print(f"   {row['Better_than_Gumbel']} {row['Model']:<5}: "
-                  f"{row['Prediction']:.2f} mm/hr (Error: {row['Error']:.2f}, "
-                  f"Improvement: {row['Improvement']:.1f}%)")
-        
-        best_model = ai_results_df.iloc[0]['Model']
-        print(f"\n   🏆 Best Model: {best_model} with {ai_results_df.iloc[0]['Improvement']:.1f}% improvement over Gumbel")
+        if len(ai_results) > 0:
+            ai_results_df = pd.DataFrame(ai_results)
+            ai_results_df = ai_results_df.sort_values('Error')
+            
+            print("\n   AI Model Performance:")
+            for _, row in ai_results_df.iterrows():
+                print(f"   {row['Better_than_Gumbel']} {row['Model']:<5}: "
+                      f"{row['Prediction']:.2f} mm/hr (Error: {row['Error']:.2f}, "
+                      f"Improvement: {row['Improvement']:.1f}%)")
+            
+            best_model = ai_results_df.iloc[0]['Model']
+            print(f"\n   🏆 Best Model: {best_model} with {ai_results_df.iloc[0]['Improvement']:.1f}% improvement over Gumbel")
+        else:
+            print("\n   No AI model predictions available for this event")
 
 def explain_ranking_vs_wins_discrepancy(superior_events, evaluation_results):
     """
@@ -1028,71 +1289,14 @@ def generate_model_ranking_summary(evaluation_results):
     for model, wins in sorted(wins_count.items(), key=lambda x: x[1], reverse=True):
         print(f"   • {model}: {wins}/4 metrics better than Gumbel")
 
-def diagnose_event_selection_bias(annual_max_df, gumbel_df, literature_df, ai_models):
-    """
-    Diagnose potential bias in event selection that might favor certain models
-    """
-    print("\n" + "=" * 100)
-    print("EVENT SELECTION BIAS ANALYSIS")
-    print("=" * 100)
-    
-    # Find ALL events where ANY AI model outperforms Gumbel (not just the best improvement)
-    all_superior_events = find_ai_superiority_events(
-        annual_max_df, gumbel_df, literature_df, ai_models, 
-        max_event_dates=None, n_events=50  # Get more events
-    )
-    
-    if len(all_superior_events) == 0:
-        print("   No events found for analysis")
-        return
-    
-    print(f"   Found {len(all_superior_events)} total events where AI outperforms Gumbel")
-    
-    # Count wins by model across ALL events
-    all_wins = all_superior_events['best_ai_model'].value_counts()
-    print("\n📊 EXPANDED EVENT WINS (all events where AI beats Gumbel):")
-    for model, wins in all_wins.items():
-        percentage = (wins / len(all_superior_events)) * 100
-        print(f"   • {model}: {wins}/{len(all_superior_events)} events ({percentage:.1f}%)")
-    
-    # Check model performance across different durations
-    duration_performance = {}
-    for _, event in all_superior_events.iterrows():
-        duration = event['duration_mins']
-        winner = event['best_ai_model']
-        
-        if duration not in duration_performance:
-            duration_performance[duration] = {'SVM': 0, 'ANN': 0, 'TCN': 0, 'TCAN': 0}
-        
-        duration_performance[duration][winner] += 1
-    
-    print("\n📈 PERFORMANCE BY DURATION (all events):")
-    for duration in sorted(duration_performance.keys()):
-        duration_str = f"{duration} min" if duration <= 60 else f"{duration/60:.0f} hr"
-        total_events = sum(duration_performance[duration].values())
-        
-        print(f"   {duration_str} ({total_events} events):")
-        for model, wins in duration_performance[duration].items():
-            if wins > 0:
-                pct = (wins / total_events) * 100
-                print(f"     • {model}: {wins} wins ({pct:.1f}%)")
-    
-    # Analyze improvement distributions
-    print("\n📊 IMPROVEMENT DISTRIBUTION BY MODEL:")
-    for model in ['SVM', 'ANN', 'TCN', 'TCAN']:
-        model_events = all_superior_events[all_superior_events['best_ai_model'] == model]
-        if len(model_events) > 0:
-            improvements = model_events['improvement_pct'].values
-            print(f"   {model}: {len(model_events)} wins, "
-                  f"Improvements: {improvements.min():.1f}%-{improvements.max():.1f}% "
-                  f"(avg: {improvements.mean():.1f}%)")
-    
-    return all_superior_events
+
 
 def main():
     print("=" * 80)
-    print("AI MODELS SUPERIORITY ANALYSIS FOR IDF CURVES")
+    print("COMPREHENSIVE IDF CURVE MODEL EVALUATION")
     print("=" * 80)
+    print("\n⚠️  METHODOLOGY: Unbiased evaluation on full validation dataset (2019-2025)")
+    print("   followed by case studies on 7 objectively-selected extreme events")
     
     # Load all datasets
     print("\n1. Loading datasets...")
@@ -1132,222 +1336,245 @@ def main():
         print(f"   ✗ Error loading data: {e}")
         return
     
-    # Find maximum event dates
-    print("\n2. Finding dates of maximum intensity events...")
-    max_event_dates = find_max_event_dates(annual_max_df)
+    # ========================================================================
+    # SECTION 1: FULL VALIDATION DATASET EVALUATION (PRIMARY ANALYSIS)
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print("SECTION 1: FULL VALIDATION DATASET EVALUATION (2019-2025)")
+    print("=" * 80)
+    print("This is the authoritative, unbiased performance evaluation.")
+    print("Matches validation period used in model training (2019-2025, 7 years).")
     
-    # Diagnose potential event selection bias first
-    print("\n3a. Diagnosing potential event selection bias...")
-    diagnose_event_selection_bias(annual_max_df, gumbel_df, literature_df, ai_models)
+    overall_metrics, per_duration_metrics, all_predictions = evaluate_full_validation_dataset(
+        annual_max_df, gumbel_df, literature_df, ai_models
+    )
     
-    # Find events where AI models outperform Gumbel
-    print("\n3b. Finding events where AI models significantly outperform Gumbel...")
-    superior_events = find_ai_superiority_events(annual_max_df, gumbel_df, literature_df, ai_models, max_event_dates, n_events=10)
-    
-    if len(superior_events) == 0:
-        print("   ✗ No superior events found")
+    if len(overall_metrics) == 0:
+        print("   ✗ Failed to evaluate full validation dataset")
         return
     
-    print(f"   ✓ Found {len(superior_events)} events where AI models significantly outperform Gumbel")
+    print("\n" + "=" * 80)
+    print(f"FULL VALIDATION RESULTS (N={len(all_predictions)} observations)")
+    print("=" * 80)
     
-    # Create superiority table
-    print("\n4. Creating superiority analysis table...")
-    superiority_table = create_superiority_table(superior_events)
+    # Sort by composite score
+    overall_metrics['Composite_Score'] = (
+        overall_metrics['RMSE'] / overall_metrics['RMSE'].max() +
+        overall_metrics['MAE'] / overall_metrics['MAE'].max() +
+        (1 - overall_metrics['R2']) +
+        (1 - overall_metrics['NSE'])
+    ) / 4
     
-    print("\n" + "=" * 100)
-    print("AI MODELS SUPERIORITY EVENTS")
-    print("=" * 100)
-    print(superiority_table.to_string(index=False))
+    overall_metrics = overall_metrics.sort_values('Composite_Score')
+    overall_metrics['Rank'] = range(1, len(overall_metrics) + 1)
+    
+    display_cols = ['Rank', 'Model', 'RMSE', 'MAE', 'R2', 'NSE', 'N']
+    print(overall_metrics[display_cols].to_string(index=False, float_format='%.4f'))
+    
+    # Statistical significance testing
+    print("\n" + "-" * 80)
+    print("STATISTICAL SIGNIFICANCE TESTS")
+    print("-" * 80)
+    
+    # Bootstrap confidence intervals for top models
+    print("\n95% Confidence Intervals (Bootstrap, 1000 iterations):")
+    for idx, row in overall_metrics.head(5).iterrows():
+        model_name = row['Model']
+        if model_name in all_predictions.columns:
+            observed = all_predictions['observed'].values
+            predicted = all_predictions[model_name].values
+            
+            rmse_lower, rmse_upper, mae_lower, mae_upper = calculate_confidence_intervals(
+                observed, predicted, n_bootstrap=1000, confidence=0.95
+            )
+            
+            print(f"\n{model_name}:")
+            print(f"   RMSE: [{rmse_lower:.4f}, {rmse_upper:.4f}]")
+            print(f"   MAE:  [{mae_lower:.4f}, {mae_upper:.4f}]")
+    
+    # Paired t-tests vs Gumbel
+    print("\n" + "-" * 80)
+    print("Paired T-Tests: Model Error Comparisons")
+    print("-" * 80)
+    print("Tests whether prediction errors differ significantly from Gumbel (reference).")
+    print("All models are evaluated against OBSERVED DATA as the true baseline.")
+    t_test_results = perform_paired_t_tests(all_predictions, baseline_model='Gumbel')
+    if len(t_test_results) > 0:
+        display_cols = ['Model', 'Mean_Error', 'Error_Diff', 'Pct_Change', 'p_value', 'vs_Baseline']
+        print(t_test_results[display_cols].to_string(index=False, float_format='%.4f'))
+    
+    # ========================================================================
+    # SECTION 2: SELECT EXTREME EVENTS (OBJECTIVE CRITERIA)
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print("SECTION 2: SELECTING EXTREME EVENTS FOR CASE STUDIES")
+    print("=" * 80)
+    print("Selection criteria: High return periods (≥3.5yr in 7-year period), high intensities, diverse durations")
+    print("NO filtering by model performance - purely objective selection.")
+    
+    extreme_events = select_extreme_events(all_predictions, all_predictions, n_events=7)
+    
+    if len(extreme_events) == 0:
+        print("   ✗ No extreme events found")
+        return
+    
+    # Find dates for selected events
+    print("\n2.1. Finding dates for selected extreme events...")
+    max_event_dates = find_max_event_dates(annual_max_df)
+    
+    # Evaluate all models on these events
+    print("\n2.2. Evaluating all models on selected events...")
+    events_analysis = evaluate_models_on_events(extreme_events, max_event_dates)
+    
+    if len(events_analysis) == 0:
+        print("   ✗ Failed to evaluate events")
+        return
+    
+    # ========================================================================
+    # SECTION 3: EXTREME EVENT CASE STUDIES (SUPPLEMENTARY ANALYSIS)
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print(f"SECTION 3: EXTREME EVENT CASE STUDIES (N={len(events_analysis)} events)")
+    print("=" * 80)
+    print("⚠️  NOTE: Event-specific metrics may differ from full dataset metrics.")
+    print("   Small sample size (N=7) vs. full validation (N={})".format(len(all_predictions)))
+    
+    # Create comparison table
+    comparison_table = create_event_comparison_table(events_analysis)
+    
+    # Create comparison table
+    comparison_table = create_event_comparison_table(events_analysis)
+    
+    print("\n" + "=" * 80)
+    print("EXTREME EVENT COMPARISON TABLE")
+    print("=" * 80)
+    print(comparison_table.to_string(index=False))
     
     # Detailed event analysis
-    detailed_model_analysis_per_event(superior_events)
+    detailed_model_analysis_per_event(events_analysis)
     
-    # Comprehensive model evaluation
-    print("\n5. Comprehensive model evaluation on selected events...")
-    evaluation_results = comprehensive_model_evaluation(superior_events, ai_models)
+    # Event-specific model evaluation
+    print("\n3.1. Model performance on selected events...")
+    event_metrics = comprehensive_model_evaluation(events_analysis, dataset_type='selected_events')
     
-    if len(evaluation_results) > 0:
+    if len(event_metrics) > 0:
         print("\n" + "=" * 80)
-        print("COMPREHENSIVE MODEL PERFORMANCE ON SUPERIOR EVENTS")
+        print(f"EVENT-SPECIFIC MODEL PERFORMANCE (N={len(events_analysis)} events)")
         print("=" * 80)
+        print("⚠️  WARNING: Small sample size - these metrics may not reflect overall performance!")
         
-        # Sort by composite score (lower is better)
-        evaluation_results['Composite_Score'] = (
-            evaluation_results['RMSE'] / evaluation_results['RMSE'].max() +
-            evaluation_results['MAE'] / evaluation_results['MAE'].max() +
-            (1 - evaluation_results['R2']) +
-            (1 - evaluation_results['NSE'])
-        ) / 4
-        
-        evaluation_results = evaluation_results.sort_values('Composite_Score')
-        evaluation_results['Rank'] = range(1, len(evaluation_results) + 1)
-        
-        # Display results
-        display_cols = ['Rank', 'Model', 'RMSE', 'MAE', 'R2', 'NSE', 'Composite_Score']
-        print(evaluation_results[display_cols].to_string(index=False, float_format='%.4f'))
-        
-        # Calculate improvements over Gumbel
-        print("\n" + "=" * 80)
-        print("AI MODELS IMPROVEMENT OVER GUMBEL")
-        print("=" * 80)
-        
-        gumbel_metrics = evaluation_results[evaluation_results['Model'] == 'Gumbel'].iloc[0]
-        
-        improvement_analysis = []
-        for idx, row in evaluation_results.iterrows():
-            if row['Model'] != 'Gumbel':
-                rmse_improvement = (gumbel_metrics['RMSE'] - row['RMSE']) / gumbel_metrics['RMSE'] * 100
-                mae_improvement = (gumbel_metrics['MAE'] - row['MAE']) / gumbel_metrics['MAE'] * 100
-                r2_improvement = row['R2'] - gumbel_metrics['R2']
-                nse_improvement = row['NSE'] - gumbel_metrics['NSE']
-                
-                improvement_analysis.append({
-                    'Model': row['Model'],
-                    'RMSE_Improvement (%)': rmse_improvement,
-                    'MAE_Improvement (%)': mae_improvement,
-                    'R2_Improvement': r2_improvement,
-                    'NSE_Improvement': nse_improvement,
-                    'Overall_Rank': row['Rank']
-                })
-        
-        improvement_df = pd.DataFrame(improvement_analysis)
-        improvement_df = improvement_df.sort_values('Overall_Rank')
-        print(improvement_df.to_string(index=False, float_format='%.3f'))
-        
-        # Calculate Gumbel vs Literature comparison
-        print("\n" + "=" * 80)
-        print("GUMBEL IDF IMPROVEMENT OVER LITERATURE IDF")
-        print("=" * 80)
-        
-        literature_metrics = evaluation_results[evaluation_results['Model'] == 'Literature']
-        if len(literature_metrics) > 0:
-            literature_metrics = literature_metrics.iloc[0]
-            
-            # Calculate improvements based on statistical metrics
-            rmse_improvement = (literature_metrics['RMSE'] - gumbel_metrics['RMSE']) / literature_metrics['RMSE'] * 100
-            mae_improvement = (literature_metrics['MAE'] - gumbel_metrics['MAE']) / literature_metrics['MAE'] * 100
-            r2_improvement = gumbel_metrics['R2'] - literature_metrics['R2']
-            nse_improvement = gumbel_metrics['NSE'] - literature_metrics['NSE']
-            
-            print(f"   RMSE Performance: Gumbel ({gumbel_metrics['RMSE']:.3f}) vs Literature ({literature_metrics['RMSE']:.3f})")
-            print(f"   RMSE Improvement: {rmse_improvement:.2f}% {'(Gumbel Better)' if rmse_improvement > 0 else '(Literature Better)'}")
-            
-            print(f"   R² Performance: Gumbel ({gumbel_metrics['R2']:.4f}) vs Literature ({literature_metrics['R2']:.4f})")
-            print(f"   R² Improvement: {r2_improvement:.4f} {'(Gumbel Better)' if r2_improvement > 0 else '(Literature Better)'}")
-            
-            print(f"   NSE Performance: Gumbel ({gumbel_metrics['NSE']:.4f}) vs Literature ({literature_metrics['NSE']:.4f})")
-            print(f"   NSE Improvement: {nse_improvement:.4f} {'(Gumbel Better)' if nse_improvement > 0 else '(Literature Better)'}")
-            
-            # Overall assessment based on key metrics
-            gumbel_better_metrics = 0
-            total_key_metrics = 3  # RMSE, R2, NSE
-            
-            if rmse_improvement > 0:  # Lower RMSE is better, so positive improvement means Gumbel is better
-                gumbel_better_metrics += 1
-            if r2_improvement > 0:  # Higher R2 is better
-                gumbel_better_metrics += 1
-            if nse_improvement > 0:  # Higher NSE is better
-                gumbel_better_metrics += 1
-            
-            print("\n   📊 Overall Assessment:")
-            print(f"   • Gumbel outperforms Literature in {gumbel_better_metrics}/{total_key_metrics} key metrics")
-            print(f"   • Literature outperforms Gumbel in {total_key_metrics - gumbel_better_metrics}/{total_key_metrics} key metrics")
-            
-            if gumbel_better_metrics > total_key_metrics / 2:
-                print("   🏆 Statistical Winner: Gumbel IDF")
-            else:
-                print("   🏆 Statistical Winner: Literature IDF")
-        else:
-            print("   Literature data not available for comparison")
-
-        # Generate detailed model ranking
-        generate_model_ranking_summary(evaluation_results)
-        
-        # Explain ranking vs wins discrepancy
-        explain_ranking_vs_wins_discrepancy(superior_events, evaluation_results)
+        event_metrics_sorted = event_metrics.sort_values('RMSE')
+        display_cols = ['Model', 'RMSE', 'MAE', 'R2', 'NSE', 'N']
+        print(event_metrics_sorted[display_cols].to_string(index=False, float_format='%.4f'))
     
-    # Save results
-    print("\n6. Saving results...")
+    # ========================================================================
+    # SECTION 4: COMPARISON OF FULL vs EVENT METRICS
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print("SECTION 4: FULL DATASET vs. EVENT-SPECIFIC METRICS COMPARISON")
+    print("=" * 80)
+    print("This explains why event-specific rankings may differ from overall rankings.")
+    
+    # Merge metrics for comparison
+    overall_for_comparison = overall_metrics[['Model', 'RMSE', 'MAE', 'R2', 'NSE']].copy()
+    overall_for_comparison.columns = ['Model', 'Full_RMSE', 'Full_MAE', 'Full_R2', 'Full_NSE']
+    
+    event_for_comparison = event_metrics[['Model', 'RMSE', 'MAE', 'R2', 'NSE']].copy()
+    event_for_comparison.columns = ['Model', 'Event_RMSE', 'Event_MAE', 'Event_R2', 'Event_NSE']
+    
+    comparison = overall_for_comparison.merge(event_for_comparison, on='Model', how='inner')
+    comparison['RMSE_Diff'] = comparison['Event_RMSE'] - comparison['Full_RMSE']
+    comparison['R2_Diff'] = comparison['Event_R2'] - comparison['Full_R2']
+    
+    print("\nModel Performance Comparison (Full Dataset vs. 7 Selected Events):")
+    print("=" * 80)
+    for _, row in comparison.iterrows():
+        print(f"\n{row['Model']}:")
+        print(f"  Full Dataset (N={len(all_predictions)}): RMSE={row['Full_RMSE']:.4f}, R²={row['Full_R2']:.4f}")
+        print(f"  Events (N={len(events_analysis)}):       RMSE={row['Event_RMSE']:.4f}, R²={row['Event_R2']:.4f}")
+        print(f"  Difference:            RMSE Δ={row['RMSE_Diff']:+.4f}, R² Δ={row['R2_Diff']:+.4f}")
+    
+    print("\n" + "=" * 80)
+    print("💡 KEY INSIGHT:")
+    print("=" * 80)
+    print("• Full dataset metrics (N={}) are AUTHORITATIVE".format(len(all_predictions)))
+    print("• Event metrics (N={}) show performance on EXTREME cases only".format(len(events_analysis)))
+    print("• Differences indicate model specialization:")
+    print("  - Some models excel on extreme events but average overall")
+    print("  - Others are consistent across all conditions")
+    print("• Use FULL DATASET metrics for general model selection")
+    print("• Use EVENT metrics for understanding extreme event capabilities")
+    
+    # ========================================================================
+    # SAVE RESULTS
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print("SAVING RESULTS")
+    print("=" * 80)
+    
     try:
-        superiority_table.to_csv('./results/extreme_event_analysis.csv', index=False)
-        print("   ✓ Superiority events saved to ./results/extreme_event_analysis.csv")
+        # Save full validation metrics (primary results)
+        overall_metrics.to_csv('./results/full_validation_metrics.csv', index=False)
+        print("   ✓ Full validation metrics saved to: ./results/full_validation_metrics.csv")
+        
+        # Save event case studies (supplementary results)
+        comparison_table.to_csv('./results/extreme_events_case_studies.csv', index=False)
+        print("   ✓ Event case studies saved to: ./results/extreme_events_case_studies.csv")
+        
+        # Save per-duration metrics
+        per_duration_metrics.to_csv('./results/full_validation_per_duration_metrics.csv', index=False)
+        print("   ✓ Per-duration metrics saved to: ./results/full_validation_per_duration_metrics.csv")
+        
     except Exception as e:
         print(f"   ✗ Error saving results: {e}")
     
-    # Summary statistics
+    # ========================================================================
+    # EXECUTIVE SUMMARY
+    # ========================================================================
     print("\n" + "=" * 80)
     print("EXECUTIVE SUMMARY")
     print("=" * 80)
-    print(f"• Validation period: 1998-2025 ({len(annual_max_df)} years)")
-    print(f"• Total events analyzed: {len(superior_events)}")
-    print(f"• Average improvement over Gumbel: {superior_events['improvement_pct'].mean():.1f}%")
-    print(f"• Best individual improvement: {superior_events['improvement_pct'].max():.1f}%")
     
-    # Average per-event improvement of Gumbel over Literature (mirroring AI over Gumbel)
-    try:
-        if 'literature_error' in superior_events.columns:
-            valid_mask = superior_events['literature_error'].notna() & (superior_events['literature_error'] > 0)
-            if valid_mask.any():
-                g_over_lit_impr = (superior_events.loc[valid_mask, 'literature_error'] - superior_events.loc[valid_mask, 'gumbel_error']) \
-                                   / superior_events.loc[valid_mask, 'literature_error'] * 100
-                print(f"• Avg improvement of Gumbel over Literature: {g_over_lit_impr.mean():.1f}% (across {valid_mask.sum()} comparable events)")
-                print(f"• Best Gumbel-over-Literature improvement: {g_over_lit_impr.max():.1f}%")
-    except Exception:
-        pass
+    print(f"\n📊 FULL VALIDATION DATASET (PRIMARY RESULTS, N={len(all_predictions)}):")
+    print("   Validation period: 2019-2025 (7 years)")
     
-    # Count model wins
-    best_models = superior_events['best_ai_model'].value_counts()
-    print(f"• Most frequent best performer: {best_models.index[0]} ({best_models.iloc[0]}/{len(superior_events)} events)")
+    # Overall best model
+    best_overall = overall_metrics.iloc[0]
+    print(f"   🏆 Best Overall Model: {best_overall['Model']}")
+    print(f"      RMSE: {best_overall['RMSE']:.4f}, MAE: {best_overall['MAE']:.4f}")
+    print(f"      R²: {best_overall['R2']:.4f}, NSE: {best_overall['NSE']:.4f}")
     
-    if len(evaluation_results) > 1:
-        ai_winner = evaluation_results[evaluation_results['Model'] != 'Gumbel'].iloc[0]['Model']
-        print(f"• Overall best AI model: {ai_winner}")
+    # AI vs Traditional comparison
+    ai_models_list = ['SVM', 'ANN', 'TCN', 'TCAN']
+    best_ai = overall_metrics[overall_metrics['Model'].isin(ai_models_list)].iloc[0]
+    gumbel_perf = overall_metrics[overall_metrics['Model'] == 'Gumbel'].iloc[0]
     
-    print(f"• Duration range analyzed: {superior_events['duration_mins'].min()}-{superior_events['duration_mins'].max()} minutes")
-    print(f"• Return period range: {superior_events['return_period'].min():.1f}-{superior_events['return_period'].max():.1f} years")
+    print(f"\n   🤖 Best AI Model: {best_ai['Model']}")
+    print(f"      RMSE: {best_ai['RMSE']:.4f} (vs. Gumbel: {gumbel_perf['RMSE']:.4f})")
+    improvement_pct = (gumbel_perf['RMSE'] - best_ai['RMSE']) / gumbel_perf['RMSE'] * 100
+    print(f"      Improvement over Gumbel: {improvement_pct:.1f}%")
     
-    # Gumbel vs Literature statistical summary
-    if len(evaluation_results) > 0:
-        literature_metrics = evaluation_results[evaluation_results['Model'] == 'Literature']
-        gumbel_metrics = evaluation_results[evaluation_results['Model'] == 'Gumbel']
-        
-        if len(literature_metrics) > 0 and len(gumbel_metrics) > 0:
-            lit_metrics = literature_metrics.iloc[0]
-            gum_metrics = gumbel_metrics.iloc[0]
-            
-            # Count how many key metrics Gumbel wins
-            gumbel_wins = 0
-            if gum_metrics['RMSE'] < lit_metrics['RMSE']:
-                gumbel_wins += 1
-            if gum_metrics['R2'] > lit_metrics['R2']:
-                gumbel_wins += 1
-            if gum_metrics['NSE'] > lit_metrics['NSE']:
-                gumbel_wins += 1
-            
-            winner = "Gumbel" if gumbel_wins >= 2 else "Literature"
-            print(f"• Gumbel vs Literature: {winner} statistically better ({gumbel_wins}/3 key metrics)")
-
-            # Also report RMSE/MAE percent improvements for Gumbel over Literature
-            try:
-                rmse_impr_pct = ((lit_metrics['RMSE'] - gum_metrics['RMSE']) / lit_metrics['RMSE'] * 100) if lit_metrics['RMSE'] not in [0, np.nan] else np.nan
-            except Exception:
-                rmse_impr_pct = np.nan
-            try:
-                mae_impr_pct = ((lit_metrics['MAE'] - gum_metrics['MAE']) / lit_metrics['MAE'] * 100) if lit_metrics['MAE'] not in [0, np.nan] else np.nan
-            except Exception:
-                mae_impr_pct = np.nan
-
-            # Only print when we have at least one valid metric
-            if not (np.isnan(rmse_impr_pct) and np.isnan(mae_impr_pct)):
-                rmse_str = f"RMSE {rmse_impr_pct:.2f}%" if not np.isnan(rmse_impr_pct) else "RMSE N/A"
-                mae_str = f"MAE {mae_impr_pct:.2f}%" if not np.isnan(mae_impr_pct) else "MAE N/A"
-                print(f"• Gumbel over Literature (metrics): {rmse_str}, {mae_str}")
+    print(f"\n📈 EXTREME EVENT CASE STUDIES (SUPPLEMENTARY, N={len(events_analysis)}):")
+    print(f"   Selected events: {len(events_analysis)} extreme events")
+    print(f"   Return period range: {events_analysis['return_period'].min():.1f}-{events_analysis['return_period'].max():.1f} years")
+    print(f"   Duration range: {events_analysis['duration_mins'].min()}-{events_analysis['duration_mins'].max()} minutes")
     
-    # Model frequency analysis
-    print("\n🏆 AI MODEL PERFORMANCE SUMMARY:")
-    for model, count in best_models.items():
-        percentage = count / len(superior_events) * 100
-        print(f"   • {model}: Best performer in {count}/{len(superior_events)} events ({percentage:.1f}%)")
+    # Count which model performs best on each event
+    if 'best_model' in events_analysis.columns:
+        best_per_event = events_analysis['best_model'].value_counts()
+        print("\n   Best model frequency on extreme events:")
+        for model, count in best_per_event.items():
+            pct = (count / len(events_analysis)) * 100
+            print(f"      • {model}: {count}/{len(events_analysis)} events ({pct:.1f}%)")
+    
+    print("\n" + "=" * 80)
+    print("✅ ANALYSIS COMPLETE")
+    print("=" * 80)
+    print("\nRecommendations:")
+    print(f"1. Use {best_overall['Model']} for general IDF curve construction")
+    print(f"2. Consider {best_ai['Model']} for AI-based approaches")
+    print("3. Review event case studies for extreme event insights")
+    print("4. Full validation metrics are in: ./results/full_validation_metrics.csv")
 
 if __name__ == "__main__":
     main()

@@ -7,10 +7,11 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from shared_io import (
-    build_idf_from_direct_predictions,
+    build_idf_from_sequential_base,
     compute_sequential_metrics,
     plot_idf_comparisons,
     plot_predictions_vs_observations,
+    shared_preprocessing,
 )
 from shared_dataprep_tcn import SequentialIDFDataset
 from uncertainty_analysis import analyze_ai_model_uncertainty
@@ -219,8 +220,8 @@ with torch.no_grad():
     last_window_scaled, last_target_scaled = val_dataset_final.get_latest_window()
     if last_window_scaled is not None:
         last_window_tensor = torch.from_numpy(last_window_scaled).to(device)  # [1, 13, seq_len]
-        predictions_scaled = final_model(last_window_tensor)  # [1, 13, 6]
-        predictions_scaled = predictions_scaled.cpu().numpy()[0]  # [13, 6]
+        predictions_scaled = final_model(last_window_tensor)  # [1, 13, 1]
+        predictions_scaled = predictions_scaled.cpu().numpy()[0]  # [13, 1]
     else:
         # Fallback: use mean of all validation predictions
         all_preds = []
@@ -228,19 +229,24 @@ with torch.no_grad():
             xb = xb.to(device)
             out = final_model(xb)
             all_preds.append(out.cpu())
-        predictions_scaled = torch.cat(all_preds).mean(dim=0).numpy()  # [13, 6]
+        predictions_scaled = torch.cat(all_preds).mean(dim=0).numpy()  # [13, 1]
 
 # Build IDF curves
 standard_durations_minutes = [5, 10, 15, 30, 60, 90, 120, 180, 360, 720, 900, 1080, 1440]
 return_periods = [2, 5, 10, 25, 50, 100]
 
-idf_artifacts = build_idf_from_direct_predictions(
+# Get frequency factors
+preproc_result = shared_preprocessing()
+frequency_factors = preproc_result['frequency_factors']
+
+idf_artifacts = build_idf_from_sequential_base(
     predictions_scaled,
     train_dataset_final.scaler_y,
-    standard_durations_minutes,
+    standard_durations_minutes,  # Use the 13 actual durations, not 1440-element array
+    frequency_factors,
     return_periods,
-    "idf_curves_TCN.csv",
-    duration_stats=train_dataset_final.duration_stats
+    standard_durations_minutes,
+    "idf_curves_TCN.csv"
 )
 
 standard_idf_curves = idf_artifacts["standard_idf_curves"]
@@ -261,12 +267,12 @@ with torch.no_grad():
         all_preds_scaled.append(out.cpu().numpy())
         all_targets_scaled.append(yb.numpy())
 
-all_preds_scaled = np.concatenate(all_preds_scaled, axis=0)  # [N, 13, 6]
-all_targets_scaled = np.concatenate(all_targets_scaled, axis=0)  # [N, 13, 6]
+all_preds_scaled = np.concatenate(all_preds_scaled, axis=0)  # [N, 13, 1]
+all_targets_scaled = np.concatenate(all_targets_scaled, axis=0)  # [N, 13, 1]
 
 # Average across all samples for final IDF
-mean_preds_scaled = all_preds_scaled.mean(axis=0)  # [13, 6]
-mean_targets_scaled = all_targets_scaled.mean(axis=0)  # [13, 6]
+mean_preds_scaled = all_preds_scaled.mean(axis=0)  # [13, 1]
+mean_targets_scaled = all_targets_scaled.mean(axis=0)  # [13, 1]
 
 # Compute metrics
 tcn_duration_metrics, overall_metrics = compute_sequential_metrics(

@@ -135,11 +135,14 @@ def shared_preprocessing():
     frequency_factors = {2: 0.85, 5: 1.00, 10: 1.25, 25: 1.50, 50: 1.75, 100: 2.00}
 
     durations = np.linspace(1, 1440, 1440)
+    
+    # NEW: Use consistent base rank instead of random ranks
+    # Base rank of 0.2 corresponds approximately to 5-year return period
+    # This ensures consistent base intensity prediction across model runs
     min_rank = combined_df["weibull_rank"].min()
     max_rank = combined_df["weibull_rank"].max()
-    np.random.seed(42)
-    random_ranks = np.random.uniform(min_rank, max_rank, size=durations.shape)
-    ranks = random_ranks
+    base_rank = 0.2  # Corresponds to ~5-year RP (frequency_factor = 1.0)
+    ranks = np.full(durations.shape, base_rank)  # All durations use same base rank
 
     standard_durations_minutes = [
         5,
@@ -167,7 +170,7 @@ def shared_preprocessing():
         "durations": durations,
         "ranks": ranks,
         "standard_durations_minutes": standard_durations_minutes,
-        "random_ranks": random_ranks,
+        "base_rank": base_rank,
     }
 
     return out
@@ -213,6 +216,74 @@ def build_idf_from_out_scaled(
     idf_df.to_csv(csv_path, index=False)
     print(f"IDF curves data saved to: {csv_path}")
 
+    return {
+        "idf_df": idf_df,
+        "idf_curves": idf_curves,
+        "standard_idf_curves": standard_idf_curves,
+        "base_intensities": base_intensities,
+    }
+
+
+def build_idf_from_sequential_base(
+    base_predictions,
+    scaler_y,
+    durations,
+    frequency_factors,
+    return_periods,
+    standard_durations_minutes,
+    csv_basename,
+):
+    """
+    Build IDF curves from base log intensity predictions (Sequential TCN/TCAN).
+    
+    This function matches the SVM/ANN approach: predict base log intensities [13,1],
+    then apply frequency_factors to generate all 6 return periods.
+    
+    Args:
+        base_predictions: np.array of shape [13, 1] - base log intensity predictions
+        scaler_y: StandardScaler to inverse transform predictions
+        durations: Array of duration values in minutes (length 13)
+        frequency_factors: Dict mapping return periods to multipliers {2: 0.85, 5: 1.0, ...}
+        return_periods: List of 6 return period values [2, 5, 10, 25, 50, 100]
+        standard_durations_minutes: List of 13 standard duration values
+        csv_basename: Output CSV filename
+    
+    Returns:
+        dict with idf_df, idf_curves, standard_idf_curves, base_intensities
+    """
+    # Inverse transform and exponentiate: [13, 1] -> [13] base intensities
+    base_log_intensities = scaler_y.inverse_transform(
+        base_predictions.reshape(-1, 1)
+    ).flatten()  # [13]
+    base_intensities = np.exp(base_log_intensities)
+    
+    # Convert durations to numpy array if it's a list
+    durations = np.array(durations)
+    
+    # Apply frequency factors to generate IDF curves
+    idf_curves = {}
+    for return_period in return_periods:
+        idf_curves[return_period] = base_intensities * frequency_factors[return_period]
+    
+    # Map to standard durations
+    standard_idf_curves = {}
+    for return_period in return_periods:
+        standard_intensities = []
+        for duration in standard_durations_minutes:
+            duration_idx = np.abs(durations - duration).argmin()
+            standard_intensities.append(idf_curves[return_period][duration_idx])
+        standard_idf_curves[return_period] = standard_intensities
+    
+    # Build DataFrame for CSV
+    idf_df_data = {"Duration (minutes)": standard_durations_minutes}
+    for rp in return_periods:
+        idf_df_data[f"{rp}-year"] = standard_idf_curves[rp]
+    
+    idf_df = pd.DataFrame(idf_df_data)
+    csv_path = os.path.join(os.path.dirname(__file__), "..", "results", csv_basename)
+    idf_df.to_csv(csv_path, index=False)
+    print(f"IDF curves data saved to: {csv_path}")
+    
     return {
         "idf_df": idf_df,
         "idf_curves": idf_curves,

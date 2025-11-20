@@ -224,9 +224,9 @@ def train_sequential_epoch(model, loader, optimizer, criterion, device):
     model.train()
     total_loss = 0.0
     for xb, yb in loader:
-        xb, yb = xb.to(device), yb.to(device)  # [batch, 13, seq_len], [batch, 13, 6]
+        xb, yb = xb.to(device), yb.to(device)  # [batch, 13, seq_len], [batch, 13, 1]
         optimizer.zero_grad()
-        out = model(xb)  # [batch, 13, 6]
+        out = model(xb)  # [batch, 13, 1]
         loss = criterion(out, yb)
         loss.backward()
         optimizer.step()
@@ -240,12 +240,12 @@ def evaluate_sequential_model(model, loader, device, scaler_y=None):
     
     Args:
         model: Sequential TCN/TCAN model
-        loader: DataLoader returning ([batch, 13, seq_len], [batch, 13, 6])
+        loader: DataLoader returning ([batch, 13, seq_len], [batch, 13, 1])
         device: torch device
         scaler_y: Optional scaler to inverse transform predictions
     
     Returns:
-        dict with metrics (nse, rmse, mae, r2) averaged across all outputs
+        dict with metrics (nse, rmse, mae, r2) for base log intensity predictions
     """
     model.eval()
     all_preds = []
@@ -254,12 +254,12 @@ def evaluate_sequential_model(model, loader, device, scaler_y=None):
     with torch.no_grad():
         for xb, yb in loader:
             xb = xb.to(device)
-            out = model(xb)  # [batch, 13, 6]
+            out = model(xb)  # [batch, 13, 1]
             all_preds.append(out.cpu())
             all_trues.append(yb)
     
-    preds = torch.cat(all_preds).numpy()  # [N, 13, 6]
-    trues = torch.cat(all_trues).numpy()  # [N, 13, 6]
+    preds = torch.cat(all_preds).numpy()  # [N, 13, 1]
+    trues = torch.cat(all_trues).numpy()  # [N, 13, 1]
     
     # Inverse transform if scaler provided
     if scaler_y is not None:
@@ -452,7 +452,7 @@ class SequentialTCN(nn.Module):
     Temporal Convolutional Network for sequential IDF prediction.
     
     Takes multi-channel time-series input [batch, 13_durations, seq_len]
-    Outputs IDF predictions [batch, 13_durations, 6_return_periods]
+    Outputs base log intensity predictions [batch, 13_durations, 1]
     """
     def __init__(self, num_channels=13, seq_len=256, num_filters=64, 
                  kernel_size=3, dropout=0.2, num_levels=4):
@@ -460,7 +460,7 @@ class SequentialTCN(nn.Module):
         self.num_channels = num_channels
         self.seq_len = seq_len
         self.num_durations = 13
-        self.num_return_periods = 6
+        self.num_return_periods = 1  # Now predicting base intensities only
         
         # TCN layers - process each duration channel
         layers = []
@@ -498,7 +498,7 @@ class SequentialTCN(nn.Module):
             x: [batch, 13, seq_len] - multi-channel time-series
         
         Returns:
-            [batch, 13, 6] - IDF predictions
+            [batch, 13, 1] - base log intensity predictions
         """
         # TCN feature extraction
         x = self.tcn_network(x)  # [batch, final_channels, reduced_seq]
@@ -518,9 +518,9 @@ class SequentialTCN(nn.Module):
         x = self.dropout2(x)
         
         # Output
-        x = self.fc_out(x)  # [batch, 78]
+        x = self.fc_out(x)  # [batch, 13]
         
-        # Reshape to [batch, 13, 6]
+        # Reshape to [batch, 13, 1]
         return x.view(-1, self.num_durations, self.num_return_periods)
 
 
@@ -529,7 +529,7 @@ class SequentialTCAN(nn.Module):
     Temporal Convolutional Attention Network for sequential IDF prediction.
     
     Takes multi-channel time-series input [batch, 13_durations, seq_len]
-    Outputs IDF predictions [batch, 13_durations, 6_return_periods]
+    Outputs base log intensity predictions [batch, 13_durations, 1]
     """
     def __init__(self, num_channels=13, seq_len=256, num_filters=64, 
                  kernel_size=3, dropout=0.2, num_levels=4, 
@@ -538,7 +538,7 @@ class SequentialTCAN(nn.Module):
         self.num_channels = num_channels
         self.seq_len = seq_len
         self.num_durations = 13
-        self.num_return_periods = 6
+        self.num_return_periods = 1  # Now predicting base intensities only
         
         # TCN layers with attention - process each duration channel
         layers = []
@@ -570,7 +570,7 @@ class SequentialTCAN(nn.Module):
         self.relu2 = nn.ReLU()
         self.dropout2 = nn.Dropout(dropout * 0.5)
         
-        # Output layer: 78 values (13 durations × 6 return periods)
+        # Output layer: 13 values (13 durations × 1 base intensity)
         self.fc_out = nn.Linear(final_channels, self.num_durations * self.num_return_periods)
     
     def forward(self, x):
@@ -579,7 +579,7 @@ class SequentialTCAN(nn.Module):
             x: [batch, 13, seq_len] - multi-channel time-series
         
         Returns:
-            [batch, 13, 6] - IDF predictions
+            [batch, 13, 1] - base log intensity predictions
         """
         # TCAN feature extraction
         x = self.tcan_network(x)  # [batch, final_channels, reduced_seq]
@@ -597,6 +597,12 @@ class SequentialTCAN(nn.Module):
         x = self.bn2(x)
         x = self.relu2(x)
         x = self.dropout2(x)
+        
+        # Output
+        x = self.fc_out(x)  # [batch, 13]
+        
+        # Reshape to [batch, 13, 1]
+        return x.view(-1, self.num_durations, self.num_return_periods)
         
         # Output
         x = self.fc_out(x)  # [batch, 78]
